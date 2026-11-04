@@ -26,24 +26,23 @@ fn press_shortcut(letter: char) -> Result<()> {
         .key(SHORTCUT_MOD, Direction::Press)
         .map_err(|e| anyhow!("keyboard: {e}"))?;
     let click = enigo.key(Key::Unicode(letter), Direction::Click);
-    let _ = enigo.key(SHORTCUT_MOD, Direction::Release);
-    click.map_err(|e| anyhow!("keyboard: {e}"))
+    let release = enigo.key(SHORTCUT_MOD, Direction::Release);
+    click.and(release).map_err(|e| anyhow!("keyboard: {e}"))
 }
 
 pub fn type_text(text: &str, restore_clipboard: bool, target: &crate::style::Target) -> Result<()> {
     anyhow::ensure!(crate::hotkey::wait_modifiers_released(Duration::from_secs(2)), "Release the shortcut keys. Your text is safe in History.");
     if !crate::style::still_target(target) { return Err(anyhow!("Destination changed. Your text is safe in History.")); }
+    let _operation = CLIPBOARD_OPERATION.try_lock().map_err(|_| anyhow!("Another clipboard operation is in progress. Retry from History."))?;
     let backup = if restore_clipboard { Some(Backup::capture()?) } else { None };
     let mut clipboard = arboard::Clipboard::new().map_err(|e| anyhow!("clipboard: {e}"))?;
-    if let Err(e) = clipboard.set_text(text.to_string()) {
-        let owned = sequence(); drop(clipboard);
-        if let Some(backup) = backup { backup.restore(owned)?; }
-        return Err(anyhow!("clipboard: {e}"));
-    }
-    let sequence = sequence();
+    let sequence = write_text(&mut clipboard, text, backup.as_ref())?;
     sleep(Duration::from_millis(40));
-    let result = if crate::style::still_target(target) { press_shortcut('v') }
-        else { Err(anyhow!("Destination changed. Your text is safe in History.")) };
+    let result = if !crate::style::still_target(target) {
+        Err(anyhow!("Destination changed. Your text is safe in History."))
+    } else if sequence != self::sequence() {
+        Err(anyhow!("Clipboard changed before pasting. Your text is safe in History."))
+    } else { press_shortcut('v') };
     if let Some(backup) = backup {
         sleep(Duration::from_millis(350));
         drop(clipboard);
@@ -54,35 +53,39 @@ pub fn type_text(text: &str, restore_clipboard: bool, target: &crate::style::Tar
 
 /// Copies whatever is selected in the focused app. Returns None when nothing
 /// is selected. The user's clipboard is put back afterwards.
-pub fn copy_selection() -> Result<Option<String>> {
+pub fn copy_selection(target: &crate::style::Target) -> Result<Option<String>> {
     anyhow::ensure!(crate::hotkey::wait_modifiers_released(Duration::from_secs(2)), "Release the shortcut keys before editing");
+    let _operation = CLIPBOARD_OPERATION.try_lock().map_err(|_| anyhow!("Another clipboard operation is in progress"))?;
     let backup = Backup::capture()?;
     let mut clipboard = arboard::Clipboard::new().map_err(|e| anyhow!("clipboard: {e}"))?;
     let sentinel = format!("\u{2063}bolo-{}", std::process::id());
-    if let Err(e) = clipboard.set_text(sentinel.clone()) {
-        let owned = sequence(); drop(clipboard); backup.restore(owned)?;
-        return Err(anyhow!("clipboard: {e}"));
-    }
+    let mut owned = write_text(&mut clipboard, &sentinel, Some(&backup))?;
     sleep(Duration::from_millis(30));
+    if !crate::style::still_target(target) || owned != sequence() {
+        drop(clipboard);
+        backup.restore(owned)?;
+        return Err(anyhow!("Selection or clipboard changed. Your dictation is safe in History."));
+    }
     if let Err(e) = press_shortcut('c') {
-        let owned = sequence(); drop(clipboard); backup.restore(owned)?;
+        drop(clipboard); backup.restore(owned)?;
         return Err(e);
     }
 
     let mut selection = None;
     for _ in 0..12 {
         sleep(Duration::from_millis(25));
+        let observed = sequence();
         match clipboard.get_text() {
-            Ok(t) if t != sentinel => {
+            Ok(t) if t != sentinel && sequence() == observed => {
+                owned = observed;
                 selection = Some(t);
                 break;
             }
             _ => {}
         }
     }
-    let sequence = sequence();
     drop(clipboard);
-    backup.restore(sequence)?;
+    backup.restore(owned)?;
     Ok(selection.filter(|s| !s.trim().is_empty()))
 }
 
@@ -92,8 +95,63 @@ fn sequence() -> u32 { unsafe { windows::Win32::System::DataExchange::GetClipboa
 fn sequence() -> Option<String> { arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()) }
 
 
+static CLIPBOARD_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(windows)]
-struct Backup { formats: Vec<(u32, Vec<u8>)> }
+struct Backup { formats: Vec<(u32, Vec<u8>)>, captured_sequence: u32 }
+
+#[cfg(windows)]
+struct OwnedGlobal(windows::Win32::Foundation::HGLOBAL);
+#[cfg(windows)]
+impl OwnedGlobal {
+    fn new(bytes: &[u8]) -> Result<Self> {
+        use windows::Win32::System::Memory::*;
+        anyhow::ensure!(!bytes.is_empty(), "Cannot restore an empty clipboard allocation");
+        unsafe {
+            let mem = Self(GlobalAlloc(GMEM_MOVEABLE, bytes.len())?);
+            let ptr = GlobalLock(mem.0);
+            anyhow::ensure!(!ptr.is_null(), "Could not allocate clipboard data");
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+            let _ = GlobalUnlock(mem.0);
+            Ok(mem)
+        }
+    }
+    fn publish(self, format: u32) -> Result<()> {
+        unsafe { windows::Win32::System::DataExchange::SetClipboardData(format, Some(windows::Win32::Foundation::HANDLE(self.0.0)))?; }
+        // Windows owns the handle only after SetClipboardData succeeds.
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+#[cfg(windows)]
+impl Drop for OwnedGlobal {
+    fn drop(&mut self) { unsafe { let _ = windows::Win32::Foundation::GlobalFree(Some(self.0)); } }
+}
+
+#[cfg(windows)]
+fn write_text(_clipboard: &mut arboard::Clipboard, text: &str, backup: Option<&Backup>) -> Result<u32> {
+    let bytes: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+    let memory = OwnedGlobal::new(&bytes)?;
+    let guard = ClipboardGuard::open()?;
+    anyhow::ensure!(backup.is_none_or(|b| b.captured_sequence == sequence()), "Clipboard changed. Retry your dictation from History.");
+    unsafe { windows::Win32::System::DataExchange::EmptyClipboard()?; }
+    let result = memory.publish(13);
+    drop(guard);
+    // CloseClipboard can synthesize additional text formats and advance the
+    // sequence. Observe the completed write, not its intermediate open state.
+    let owned = sequence();
+    if let Err(e) = result {
+        if let Some(backup) = backup { backup.restore(owned)?; }
+        return Err(e);
+    }
+    Ok(owned)
+}
+#[cfg(not(windows))]
+fn write_text(clipboard: &mut arboard::Clipboard, text: &str, _backup: Option<&Backup>) -> Result<Option<String>> {
+    clipboard.set_text(text.to_string())?;
+    Ok(Some(text.to_string()))
+}
+
 #[cfg(windows)]
 struct ClipboardGuard(windows::Win32::Foundation::HWND);
 #[cfg(windows)]
@@ -126,10 +184,15 @@ impl Backup {
         let mut formats = Vec::new(); let mut format = 0; let mut bytes_total = 0; let mut bitmap = false;
         unsafe {
             loop {
-                format = EnumClipboardFormats(format); if format == 0 { break; }
+                windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+                format = EnumClipboardFormats(format);
+                if format == 0 {
+                    anyhow::ensure!(windows::Win32::Foundation::GetLastError().0 == 0, "Could not enumerate clipboard formats; clipboard left unchanged");
+                    break;
+                }
                 // Windows synthesizes a bitmap handle from DIB; store the portable DIB.
                 if format == 2 || format == 9 { bitmap = true; continue; }
-                anyhow::ensure!(!matches!(format, 3 | 14 | 128 | 130 | 131 | 142), "This clipboard format cannot be preserved safely. Copy text first or turn off Keep my clipboard.");
+                anyhow::ensure!(!matches!(format, 3 | 14 | 128 | 130 | 131 | 142 | 0x200..=0x3ff), "This clipboard format cannot be preserved safely. Copy text first or turn off Keep my clipboard.");
                 let data = GetClipboardData(format)?;
                 let mem = HGLOBAL(data.0); let size = GlobalSize(mem);
                 anyhow::ensure!(size > 0, "Clipboard format cannot be copied safely");
@@ -143,31 +206,44 @@ impl Backup {
             }
         }
         anyhow::ensure!(!bitmap || formats.iter().any(|(f,_)| *f == 8 || *f == 17), "Bitmap clipboard could not be preserved safely");
-        Ok(Self { formats })
+        Ok(Self { formats, captured_sequence: sequence() })
     }
-    fn restore(self, owned_sequence: u32) -> Result<()> {
-        use windows::Win32::{Foundation::{HANDLE, GlobalFree}, System::{DataExchange::*, Memory::*}};
+    fn restore(&self, owned_sequence: u32) -> Result<()> {
+        use windows::Win32::System::DataExchange::EmptyClipboard;
         if sequence() != owned_sequence { return Ok(()); }
+        // Prepare every allocation before clearing anything. Drop frees only
+        // handles not handed to Windows, including on partial failure.
+        let prepared = self.formats.iter().map(|(f, b)| Ok((*f, OwnedGlobal::new(b)?)))
+            .collect::<Result<Vec<_>>>()?;
         let _guard = ClipboardGuard::open()?;
         if sequence() != owned_sequence { return Ok(()); }
-        unsafe {
-            EmptyClipboard()?;
-            for (format, bytes) in self.formats {
-                let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
-                let ptr = GlobalLock(mem);
-                if ptr.is_null() { let _ = GlobalFree(Some(mem)); return Err(anyhow!("Could not restore clipboard")); }
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
-                let _ = GlobalUnlock(mem);
-                if let Err(e) = SetClipboardData(format, Some(HANDLE(mem.0))) { let _ = GlobalFree(Some(mem)); return Err(e.into()); }
-            }
+        unsafe { EmptyClipboard()?; }
+        let mut error = None;
+        for (format, memory) in prepared {
+            if let Err(e) = memory.publish(format) { error = Some(e); }
         }
+        if let Some(e) = error { return Err(anyhow!("Clipboard could only be partly restored: {e}")); }
         Ok(())
     }
+
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    #[test]
+    fn global_memory_roundtrip_and_empty_allocation_rejected() {
+        assert!(OwnedGlobal::new(&[]).is_err());
+        let bytes = [1u8, 2, 3, 4];
+        let memory = OwnedGlobal::new(&bytes).unwrap();
+        unsafe {
+            let ptr = windows::Win32::System::Memory::GlobalLock(memory.0);
+            assert!(!ptr.is_null());
+            assert_eq!(std::slice::from_raw_parts(ptr as *const u8, bytes.len()), bytes);
+            let _ = windows::Win32::System::Memory::GlobalUnlock(memory.0);
+        }
+        // Drop frees this unpublished allocation. This test does not touch the clipboard.
+    }
     /// Opt-in: restores the user's full clipboard after exercising restoration.
     #[test]
     fn clipboard_restores_and_respects_new_copy() {
@@ -176,6 +252,14 @@ mod tests {
         let mut clipboard = arboard::Clipboard::new().unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             clipboard.set_text("original text").unwrap();
+            let backup = Backup::capture().unwrap();
+            let written = write_text(&mut clipboard, "native dictation", Some(&backup)).unwrap();
+            assert_eq!(written, sequence(), "Closing the clipboard must not invalidate Bolo's own write");
+            sleep(Duration::from_millis(40));
+            assert_eq!(written, sequence(), "Bolo's clipboard write must remain valid until paste");
+            assert_eq!(clipboard.get_text().unwrap(), "native dictation");
+            backup.restore(written).unwrap();
+            assert_eq!(clipboard.get_text().unwrap(), "original text");
             let backup = Backup::capture().unwrap();
             clipboard.set_text("dictation").unwrap(); let owned = sequence();
             backup.restore(owned).unwrap();
@@ -194,7 +278,7 @@ mod tests {
             files[0..4].copy_from_slice(&20u32.to_le_bytes());
             files[16..20].copy_from_slice(&1u32.to_le_bytes());
             for c in "C:\\Bolo-test.txt\0\0".encode_utf16() { files.extend_from_slice(&c.to_le_bytes()); }
-            Backup { formats: vec![(15, files.clone())] }.restore(sequence()).unwrap();
+            Backup { formats: vec![(15, files.clone())], captured_sequence: sequence() }.restore(sequence()).unwrap();
             let backup = Backup::capture().unwrap();
             clipboard.set_text("dictation").unwrap(); let owned = sequence();
             backup.restore(owned).unwrap();

@@ -30,25 +30,27 @@ pub struct ModelStatus {
     pub downloaded: bool,
 }
 
-pub fn dir(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir().expect("no data dir").join("models")
+pub fn dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app.path().app_data_dir()?.join("models"))
 }
 
-pub fn path(app: &AppHandle, name: &str) -> PathBuf {
-    dir(app).join(format!("ggml-{name}.bin"))
+pub fn path(app: &AppHandle, name: &str) -> Result<PathBuf> {
+    anyhow::ensure!(MODELS.iter().any(|m| m.name == name), "Unknown offline model");
+    Ok(dir(app)?.join(format!("ggml-{name}.bin")))
 }
 
-pub fn list(app: &AppHandle) -> Vec<ModelStatus> {
-    MODELS
+pub fn list(app: &AppHandle) -> Result<Vec<ModelStatus>> {
+    let directory = dir(app)?;
+    Ok(MODELS
         .iter()
         .map(|m| ModelStatus {
             name: m.name.into(),
             label: m.label.into(),
             size_mb: m.size_mb,
             note: m.note.into(),
-            downloaded: path(app, m.name).exists(),
+            downloaded: directory.join(format!("ggml-{}.bin", m.name)).exists(),
         })
-        .collect()
+        .collect())
 }
 
 #[derive(Clone, Serialize)]
@@ -63,10 +65,10 @@ pub async fn download(app: &AppHandle, http: &reqwest::Client, name: &str) -> Re
         return Err(anyhow!("unknown model {name}"));
     }
     let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin");
-    let res = http.get(url).send().await?.error_for_status()?;
+    let res = http.get(url).timeout(std::time::Duration::from_secs(3600)).send().await?.error_for_status()?;
     let total = res.content_length().unwrap_or(0);
-    std::fs::create_dir_all(dir(app))?;
-    let final_path = path(app, name);
+    std::fs::create_dir_all(dir(app)?)?;
+    let final_path = path(app, name)?;
     let tmp = final_path.with_extension("part");
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut stream = res.bytes_stream();

@@ -41,6 +41,11 @@ function showStatus(text: string, error = false) {
   saveState.classList.toggle("error", error);
 }
 
+window.addEventListener("unhandledrejection", (event) => {
+  event.preventDefault();
+  showStatus(String(event.reason), true);
+});
+
 async function save() {
   try {
     const snapshot = structuredClone(settings);
@@ -343,6 +348,12 @@ listen<{ state: string; message?: string }>("bolo://state", (e) => {
 $("#cancel-processing").addEventListener("click", () => void invoke("cancel_processing"));
 let testingMic = false;
 let micTimer: number | undefined;
+void listen("bolo://mic-test-ended", () => {
+  window.clearTimeout(micTimer);
+  testingMic = false;
+  $("#test-microphone").textContent = "Test microphone";
+  $<HTMLMeterElement>("#mic-level").value = 0;
+});
 async function loadMicrophones() {
   try {
     const names = await invoke<string[]>("list_microphones"); const select=$<HTMLSelectElement>("#microphone");
@@ -382,6 +393,8 @@ $("#check-update").addEventListener("click", () => void checkForUpdates());
 (async () => {
   settings = await invoke<Settings>("get_settings");
   os = await invoke<string>("platform");
+  const initialStatus = await invoke<{ state: string; message?: string }>("get_status");
+  if (initialStatus.state === "error") showStatus(initialStatus.message ?? "Bolo could not start", true);
 
   for (const select of document.querySelectorAll<HTMLSelectElement>('.style-grid select')) {
     for (const [value,label] of [["formal","Formal — Hello, team."],["casual","Casual — Hello, team"],["lowercase","Lowercase — hello, team"],["literal","Literal — preserve wording"]]) select.add(new Option(label,value));

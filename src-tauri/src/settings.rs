@@ -115,29 +115,37 @@ impl Settings {
     }
 }
 
-fn path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_config_dir()
-        .expect("no config dir")
-        .join("settings.json")
+fn path(app: &AppHandle) -> anyhow::Result<PathBuf> {
+    Ok(app.path().app_config_dir()?.join("settings.json"))
 }
 
-pub fn load(app: &AppHandle) -> Settings {
-    let s: Settings = std::fs::read_to_string(path(app))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    let mut s = migrate(s);
-    // Migrate legacy plaintext only after the OS credential store accepts it.
+pub fn load(app: &AppHandle) -> (Settings, Option<String>) {
+    let mut warning = None;
+    let read = path(app).and_then(|p| read_settings(&p));
+    let mut s = migrate(match read {
+        Ok(s) => s,
+        Err(_) => { warning = Some("Settings could not be read. The original file has been kept; settings changes are blocked until it is repaired.".into()); Settings::default() }
+    });
     if !s.groq_api_key.is_empty() {
         if save(app, &s).is_err() {
-            eprintln!("Could not migrate the API key to the OS credential store");
+            warning = Some("Could not move the Groq key to secure storage. The original key has been kept.".into());
         } else { s.groq_key_saved = true; }
-    } else if let Ok(entry) = keyring::Entry::new("com.peeenudotcom.bolo", "groq") {
-        s.groq_api_key = entry.get_password().unwrap_or_default();
-        s.groq_key_saved |= !s.groq_api_key.is_empty();
+    } else {
+        match keyring::Entry::new("com.peeenudotcom.bolo", "groq").and_then(|e| e.get_password()) {
+            Ok(key) => { s.groq_api_key = key; s.groq_key_saved = true; }
+            Err(keyring::Error::NoEntry) if !s.groq_key_saved => {}
+            Err(_) => { s.groq_key_saved = true; warning = Some("The saved Groq key is unavailable. Unlock your credential store or re-enter the key; it has not been deleted.".into()); }
+        }
     }
-    s
+    (s, warning)
+}
+
+fn read_settings(p: &std::path::Path) -> anyhow::Result<Settings> {
+    match std::fs::read(p) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn migrate(mut s: Settings) -> Settings {
@@ -173,28 +181,57 @@ fn migrate(mut s: Settings) -> Settings {
 }
 
 pub fn save(app: &AppHandle, s: &Settings) -> anyhow::Result<()> {
-    if s.groq_api_key.is_empty() {
-        if s.groq_key_saved {
-            let entry = keyring::Entry::new("com.peeenudotcom.bolo", "groq")?;
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(e.into()),
-            }
+    save_with_key_removal(app, s, false)
+}
+
+pub fn save_with_key_removal(app: &AppHandle, s: &Settings, remove_key: bool) -> anyhow::Result<()> {
+    persist_settings(&path(app)?, s, remove_key, &OsCredential)
+}
+
+trait Credential {
+    fn get(&self) -> anyhow::Result<Option<String>>;
+    fn set(&self, value: Option<&str>) -> anyhow::Result<()>;
+}
+struct OsCredential;
+impl Credential for OsCredential {
+    fn get(&self) -> anyhow::Result<Option<String>> {
+        match keyring::Entry::new("com.peeenudotcom.bolo", "groq")?.get_password() {
+            Ok(v) => Ok(Some(v)), Err(keyring::Error::NoEntry) => Ok(None), Err(e) => Err(e.into())
         }
-    } else {
-        let entry = keyring::Entry::new("com.peeenudotcom.bolo", "groq")?;
-        entry.set_password(&s.groq_api_key)?;
     }
+    fn set(&self, value: Option<&str>) -> anyhow::Result<()> {
+        let entry = keyring::Entry::new("com.peeenudotcom.bolo", "groq")?;
+        match value {
+            Some(v) => entry.set_password(v)?,
+            None => match entry.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => {}, Err(e) => return Err(e.into()) }
+        }
+        Ok(())
+    }
+}
+
+fn disk_settings(s: &Settings, remove_key: bool) -> Settings {
     let mut disk = s.clone();
     disk.groq_api_key.clear();
-    disk.groq_key_saved = !s.groq_api_key.is_empty();
-    let p = path(app);
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+    disk.groq_key_saved = !remove_key && (s.groq_key_saved || !s.groq_api_key.is_empty());
+    disk
+}
+
+fn persist_settings(p: &std::path::Path, s: &Settings, remove_key: bool, credential: &impl Credential) -> anyhow::Result<()> {
+    // Never overwrite malformed/unreadable settings, including a legacy key.
+    read_settings(p)?;
+    let disk = disk_settings(s, remove_key);
+    if let Some(dir) = p.parent() { std::fs::create_dir_all(dir)?; }
     let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&disk)?)?;
-    std::fs::rename(tmp, p)?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&disk)?)?;
+    let change_key = remove_key || !s.groq_api_key.is_empty();
+    let previous = if change_key { credential.get()? } else { None };
+    if change_key { credential.set(if remove_key { None } else { Some(&s.groq_api_key) })?; }
+    if let Err(e) = std::fs::rename(&tmp, p) {
+        if change_key {
+            credential.set(previous.as_deref()).map_err(|_| anyhow::anyhow!("Settings could not be saved and credential rollback failed. Check your Groq key before continuing."))?;
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -213,6 +250,66 @@ pub fn live_test_key() -> Result<String, std::env::VarError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeCredential {
+        value: std::cell::RefCell<Option<String>>,
+        locked: bool,
+        remove_tmp: Option<PathBuf>,
+    }
+    impl Credential for FakeCredential {
+        fn get(&self) -> anyhow::Result<Option<String>> {
+            anyhow::ensure!(!self.locked, "locked");
+            Ok(self.value.borrow().clone())
+        }
+        fn set(&self, value: Option<&str>) -> anyhow::Result<()> {
+            anyhow::ensure!(!self.locked, "locked");
+            *self.value.borrow_mut() = value.map(str::to_string);
+            if let Some(p) = &self.remove_tmp { let _ = std::fs::remove_file(p); }
+            Ok(())
+        }
+    }
+    fn test_path(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.scratch")
+            .join(format!("settings-{name}-{}-{}", std::process::id(), crate::history::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("settings.json")
+    }
+    #[test]
+    fn unavailable_key_is_preserved_by_unrelated_saves() {
+        let p = test_path("locked");
+        let credential = FakeCredential { value: std::cell::RefCell::new(Some("test-key".into())), locked: true, remove_tmp: None };
+        let s = Settings { groq_key_saved: true, ..Default::default() };
+        persist_settings(&p, &s, false, &credential).unwrap();
+        assert_eq!(credential.value.borrow().as_deref(), Some("test-key"));
+        assert!(read_settings(&p).unwrap().groq_key_saved);
+        assert!(read_settings(&p).unwrap().groq_api_key.is_empty());
+        assert!(persist_settings(&p, &s, true, &credential).is_err());
+        assert_eq!(credential.value.borrow().as_deref(), Some("test-key"));
+    }
+    #[test]
+    fn migration_never_serializes_the_key_and_failed_commit_rolls_back() {
+        let p = test_path("migration");
+        let s = Settings { groq_api_key: "new-test-key".into(), ..Default::default() };
+        let credential = FakeCredential { value: std::cell::RefCell::new(Some("old-test-key".into())), locked: false, remove_tmp: Some(p.with_extension("tmp")) };
+        assert!(persist_settings(&p, &s, false, &credential).is_err());
+        assert_eq!(credential.value.borrow().as_deref(), Some("old-test-key"));
+        let credential = FakeCredential { remove_tmp: None, ..credential };
+        persist_settings(&p, &s, false, &credential).unwrap();
+        let disk = std::fs::read_to_string(&p).unwrap();
+        assert!(!disk.contains("new-test-key"));
+        assert!(read_settings(&p).unwrap().groq_key_saved);
+        persist_settings(&p, &Settings::default(), true, &credential).unwrap();
+        assert!(credential.value.borrow().is_none());
+    }
+    #[test]
+    fn malformed_settings_are_not_overwritten() {
+        let p = test_path("malformed");
+        std::fs::write(&p, "{broken").unwrap();
+        let credential = FakeCredential { value: std::cell::RefCell::new(Some("test-key".into())), locked: false, remove_tmp: None };
+        assert!(persist_settings(&p, &Settings::default(), true, &credential).is_err());
+        assert_eq!(std::fs::read_to_string(p).unwrap(), "{broken");
+        assert_eq!(credential.value.borrow().as_deref(), Some("test-key"));
+    }
 
     #[test]
     fn detects_language_without_reenabling_hinglish() {

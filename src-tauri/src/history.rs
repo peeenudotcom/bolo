@@ -24,14 +24,19 @@ pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-pub struct Store { pub items: Vec<Item>, dir: PathBuf }
+pub struct Store { pub items: Vec<Item>, dir: PathBuf, load_error: Option<String> }
 
 impl Store {
     pub fn new(dir: PathBuf, s: &Settings) -> Self {
-        let items = if s.history_retention != "session" {
-            std::fs::read(dir.join("history.json")).ok().and_then(|v| serde_json::from_slice(&v).ok()).unwrap_or_default()
-        } else { Vec::new() };
-        let mut store = Self { items, dir };
+        let loaded: anyhow::Result<Vec<Item>> = if s.history_retention != "session" {
+            match std::fs::read(dir.join("history.json")) {
+                Ok(v) => serde_json::from_slice(&v).map_err(Into::into),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(e) => Err(e.into()),
+            }
+        } else { Ok(Vec::new()) };
+        let (items, load_error) = match loaded { Ok(items) => (items, None), Err(_) => (Vec::new(), Some("Saved history could not be read. Its files have been kept; repair them before saving more history.".into())) };
+        let mut store = Self { items, dir, load_error };
         for item in &mut store.items {
             item.has_audio = s.save_audio && store.dir.join(format!("{}.wav", item.id)).exists();
             if item.status == "processing" { item.status = "interrupted".into(); }
@@ -45,10 +50,12 @@ impl Store {
         if !item.audio.is_empty() { return Ok(item.audio.clone()); }
         anyhow::ensure!(item.has_audio, "No recording saved for this dictation");
         let mut reader = hound::WavReader::open(self.dir.join(format!("{id}.wav")))?;
+        anyhow::ensure!(reader.spec().channels == 1 && reader.spec().sample_rate == 16000 && reader.spec().bits_per_sample == 16 && reader.spec().sample_format == hound::SampleFormat::Int, "Saved recording has an unsupported audio format");
         Ok(reader.samples::<i16>().collect::<Result<Vec<_>,_>>()?.iter().map(|s| *s as f32 / i16::MAX as f32).collect())
     }
 
     pub fn persist(&mut self, s: &Settings) -> anyhow::Result<()> {
+        if let Some(error) = &self.load_error { anyhow::bail!("{error}"); }
         let age = match s.history_retention.as_str() { "day" => 86_400_000, "week" => 604_800_000, _ => u64::MAX };
         let cutoff = now().saturating_sub(age);
         self.items.retain(|i| i.at >= cutoff);
@@ -129,5 +136,18 @@ mod tests {
         store.persist(&s).unwrap();
         assert!(store.items.is_empty()); assert!(!store.dir.join("3.wav").exists());
         assert!(store.audio(3).is_err());
+    }
+
+    #[test]
+    fn corrupt_history_does_not_delete_saved_recordings() {
+        let path = dir("corrupt");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("history.json"), "{broken").unwrap();
+        std::fs::write(path.join("9.wav"), b"keep this recording").unwrap();
+        let s = Settings { history_retention: "day".into(), save_audio: true, ..Default::default() };
+        let mut store = Store::new(path.clone(), &s);
+        assert!(store.persist(&s).is_err());
+        assert_eq!(std::fs::read_to_string(path.join("history.json")).unwrap(), "{broken");
+        assert!(path.join("9.wav").exists());
     }
 }

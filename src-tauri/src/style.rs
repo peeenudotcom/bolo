@@ -116,7 +116,7 @@ pub fn preference_hint(preference: &str) -> &'static str {
 }
 
 pub fn finish_preferred(text: &str, preference: &str) -> String {
-    if matches!(preference, "casual" | "lowercase" | "literal") { finish(text, AppKind::Chat) }
+    if matches!(preference, "casual" | "lowercase") { finish(text, AppKind::Chat) }
     else { text.trim().to_string() }
 }
 
@@ -245,5 +245,6 @@ mod tests {
         assert_eq!(finish("See you tomorrow.", AppKind::Chat), "See you tomorrow");
         assert_eq!(finish("Wait...", AppKind::Chat), "Wait...");
         assert_eq!(finish("Done.", AppKind::Email), "Done.");
+        assert_eq!(finish_preferred("object.", "literal"), "object.");
     }
 }

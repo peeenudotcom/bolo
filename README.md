@@ -45,8 +45,11 @@ Leave **Language** on **Automatic** when switching between English, Hindi and mi
 **Write Hindi as Hinglish** is on by default: Hindi is written in Roman letters
 (“kal milte hain”), while English stays English. Switch it off for Hindi in
 Devanagari (“कल मिलते हैं”), with English words kept in English.
-Keep AI cleanup on with Groq or Ollama for script conversion. Without cleanup,
-Whisper's raw output can use a different script. This changes the writing script,
+Keep AI cleanup on with Groq or Ollama for script conversion. With Hinglish on,
+Bolo checks for Latin-script words before pasting. Automatic recognition that
+returns an unexpected script is retried with a Hindi hint. If script conversion
+still fails, the text stays in History instead of being pasted in the wrong script.
+This changes the writing script,
 not the meaning or language; it does not translate Hindi into English.
 
 Recognition can still miss words, especially with noise or mixed speech. Check

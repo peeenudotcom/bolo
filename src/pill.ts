@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 type Status = { state: "idle" | "recording" | "processing" | "error"; message?: string | null };
 
@@ -23,7 +24,11 @@ function setState(s: Status) {
   if (s.state !== "recording") bars.forEach((b) => (b.style.height = "4px"));
 }
 
-listen<Status>("bolo://state", (e) => setState(e.payload));
+// Setup errors can happen before this WebView has registered its listener.
+void listen<Status>("bolo://state", (e) => setState(e.payload))
+  .then(() => invoke<Status>("get_status"))
+  .then(setState)
+  .catch(() => setState({ state: "error", message: "Bolo could not connect. Please restart it." }));
 
 listen<number>("bolo://level", (e) => {
   if (!pill.classList.contains("recording")) return;

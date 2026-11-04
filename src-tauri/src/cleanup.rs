@@ -3,6 +3,22 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
+use std::sync::LazyLock;
+
+static NON_LATIN_LETTERS: LazyLock<regex::Regex> = LazyLock::new(||
+    regex::Regex::new(r"[\p{L}&&\P{Latin}]").expect("constant script regex"));
+static UNEXPECTED_HINGLISH_SCRIPT: LazyLock<regex::Regex> = LazyLock::new(||
+    regex::Regex::new(r"[\p{L}&&\P{Latin}&&\P{Devanagari}]").expect("constant script regex"));
+
+pub fn needs_hindi_retry(text: &str, language: &str, roman: bool) -> bool {
+    roman && language == "auto" && UNEXPECTED_HINGLISH_SCRIPT.is_match(text)
+}
+
+pub fn ensure_roman_output(text: &str) -> Result<()> {
+    anyhow::ensure!(!NON_LATIN_LETTERS.is_match(text),
+        "Hinglish conversion failed. Text is saved in History; enable AI cleanup and retry.");
+    Ok(())
+}
 
 const BASE_PROMPT: &str = "You are a dictation cleanup engine. The user message contains a raw speech-to-text transcript inside <transcript> tags. Return ONLY the cleaned text, with no preamble, quotes or tags.
 
@@ -62,7 +78,8 @@ async fn chat_once(http: &reqwest::Client, target: Target<'_>, system: &str, use
     }
     let res = req.send().await.map_err(|e| ChatError::Other(e.into()))?;
     let status = res.status();
-    let body: serde_json::Value = res.json().await.unwrap_or_default();
+    let body: serde_json::Value = res.json().await
+        .map_err(|_| ChatError::Other(anyhow!("AI {status}: invalid JSON response")))?;
     if !status.is_success() {
         let msg = body["error"]["message"]
             .as_str()
@@ -76,8 +93,11 @@ async fn chat_once(http: &reqwest::Client, target: Target<'_>, system: &str, use
             || (lower.contains("model") && (lower.contains("decommission") || lower.contains("not found") || lower.contains("does not exist")));
         return Err(if unknown { ChatError::UnknownModel(msg) } else { ChatError::Other(anyhow!("AI {status}: {msg}")) });
     }
-    let text = body["choices"][0]["message"]["content"].as_str().unwrap_or_default();
-    Ok(strip_thinking(text))
+    let text = body["choices"][0]["message"]["content"].as_str()
+        .ok_or_else(|| ChatError::Other(anyhow!("AI response contains no text")))?;
+    let text = strip_thinking(text);
+    if text.is_empty() { return Err(ChatError::Other(anyhow!("The AI returned nothing"))); }
+    Ok(text)
 }
 
 /// Some models wrap their reasoning in <think> tags; never type that out.
@@ -161,7 +181,7 @@ pub async fn run(
     }
     if hinglish_roman {
         system.push_str(
-            "\n- Write any Hindi in Roman script (Hinglish, e.g. \"kal milte hain\"), never in Devanagari. Keep English words in English.",
+            "\n- HINGLISH OUTPUT: Use Latin letters for ALL words. Keep English in English. Romanize Hindi/Hindustani even if the transcript uses Devanagari or Urdu/Arabic script. Never leave words in another script, and do not translate them into English. Preserve the spoken meaning and names; do not invent missing words. Example: \"ChatGPT, कैसे हो आप? कल मिलते हैं।\" becomes \"ChatGPT, kaise ho aap? Kal milte hain.\" Questions remain questions, never answer them.",
         );
     } else {
         system.push_str(
@@ -171,22 +191,73 @@ pub async fn run(
 
     let out = chat(http, target, &system, &format!("<transcript>\n{raw}\n</transcript>"))
         .await?;
-    let out = out
+    let mut out = out
         .trim_start_matches("<transcript>")
         .trim_end_matches("</transcript>")
         .trim()
         .to_string();
 
     // Guard against the model answering instead of cleaning.
-    if out.is_empty() || out.chars().count() > raw.chars().count() * 2 + 80 {
-        return Ok(raw.to_string());
+    if hinglish_roman && NON_LATIN_LETTERS.is_match(&out) {
+        system.push_str("\nThe previous attempt retained non-Latin letters. Correct the script only: every word must use Latin letters. Do not explain, translate or add content.");
+        out = chat(http, target, &system, &format!("<transcript>\n{raw}\n</transcript>")).await?
+            .trim_start_matches("<transcript>").trim_end_matches("</transcript>").trim().to_string();
     }
+    anyhow::ensure!(!out.is_empty() && out.chars().count() <= raw.chars().count() * 2 + 80,
+        "AI cleanup returned an unusable result. Raw text is saved in History; retry.");
+    if hinglish_roman { ensure_roman_output(&out)?; }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{expand_snippets, strip_thinking};
+
+    #[test]
+    fn hinglish_requires_latin_words_but_keeps_emoji_and_accents() {
+        for text in ["Hello. Kaise ho aap? Kal milte hain.", "Café, ₹500 👍", "ChatGPT"] {
+            assert!(super::ensure_roman_output(text).is_ok());
+        }
+        for text in ["قلم التين", "कल मिलते हैं", "Hello, 世界"] {
+            assert!(super::ensure_roman_output(text).is_err());
+        }
+        assert!(super::needs_hindi_retry("Hello. قلم التين", "auto", true));
+        assert!(!super::needs_hindi_retry("Hello. कल मिलते हैं", "auto", true));
+        assert!(!super::needs_hindi_retry("Hello", "auto", true));
+        assert!(!super::needs_hindi_retry("قلم التين", "ur", true));
+        assert!(!super::needs_hindi_retry("قلم التين", "auto", false));
+    }
+
+    #[test]
+    fn groq_hinglish_romanizes_hindustani_scripts() {
+        let Ok(key) = crate::settings::live_test_key() else { return; };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+            let target = super::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+            for raw in ["Hello. ChatGPT, कैसे हो आप? कल मिलते हैं।", "Hello. ChatGPT, کیسے ہو آپ؟ کل ملتے ہیں۔", "Hello. قلم التين"] {
+                let out = super::run(&http, target, raw, &["ChatGPT".into()], true, None).await.unwrap();
+                eprintln!("Roman cleanup: {out}");
+                super::ensure_roman_output(&out).unwrap();
+                assert!(out.to_lowercase().contains("hello"));
+            }
+        });
+    }
+
+    #[test]
+    fn groq_preserves_short_hindi_phrases() {
+        let Ok(key) = crate::settings::live_test_key() else { return; };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+            let target = super::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+            for raw in ["Kal milte hain.", "कल मिलते हैं।", "Mujhe paani chahiye.", "Aap kaise ho?", "Kal meeting hai."] {
+                let out = super::run(&http, target, raw, &[], true, Some(crate::style::preference_hint("formal"))).await.unwrap();
+                eprintln!("Preservation: {raw} -> {out}");
+                assert!(!out.to_lowercase().contains("meet you"), "Hindi was translated: {out}");
+            }
+        });
+    }
 
     /// Live check against Groq. Set BOLO_TEST_GROQ_KEY to run.
     #[test]
@@ -242,6 +313,9 @@ mod tests {
         let pairs = vec![("sign".into(), "signature".into())];
         assert_eq!(expand_snippets("design sign signal", &pairs), "design signature signal");
         assert_eq!(super::correct("bolo app works", "bolo app => Bolo"), "Bolo works");
+        // Total UTF-8 length is unchanged by lowercasing, but byte positions move.
+        assert_eq!(expand_snippets("İİK", &vec![("k".into(), "kelvin".into())]), "İİK");
+        assert_eq!(expand_snippets("K and k", &vec![("k".into(), "kelvin".into())]), "kelvin and kelvin");
     }
 }
 
@@ -249,22 +323,21 @@ mod tests {
 pub fn expand_snippets(text: &str, pairs: &[(String, String)]) -> String {
     let mut out = text.to_string();
     for (trigger, replacement) in pairs {
-        let lower = out.to_lowercase();
-        let t = trigger.to_lowercase();
-        // Byte offsets only line up when lowercasing kept the length.
-        if t.is_empty() || lower.len() != out.len() || !lower.contains(&t) {
-            continue;
-        }
+        if trigger.is_empty() { continue; }
+        // Match against the original string: Unicode case folding can change
+        // individual byte offsets even when the total length stays the same.
+        let Ok(pattern) = regex::RegexBuilder::new(&regex::escape(trigger)).case_insensitive(true).build() else { continue; };
         let mut result = String::with_capacity(out.len());
         let mut last = 0;
-        for (idx, _) in lower.match_indices(&t) {
+        for matched in pattern.find_iter(&out) {
+            let idx = matched.start();
             let before = out[..idx].chars().next_back();
-            let after = out[idx + t.len()..].chars().next();
+            let after = out[matched.end()..].chars().next();
             let word = |c: char| c.is_alphanumeric() || c == '_';
             if before.is_some_and(word) || after.is_some_and(word) { continue; }
             result.push_str(&out[last..idx]);
             result.push_str(replacement);
-            last = idx + t.len();
+            last = matched.end();
         }
         result.push_str(&out[last..]);
         out = result;

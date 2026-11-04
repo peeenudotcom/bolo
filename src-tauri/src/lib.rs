@@ -42,7 +42,9 @@ struct AppState {
     whisper: transcribe::WhisperCache,
     history: Mutex<history::Store>,
     cancel: Mutex<Arc<AtomicBool>>,
-    mic_test: Mutex<Option<audio::Recorder>>,
+    mic_test: Mutex<Option<(Instant, audio::Recorder)>>,
+    settings_updates: Mutex<()>,
+    last_status: Mutex<StatusEvent>,
     http: reqwest::Client,
     /// Where and when Bolo last typed, to decide on a joining space.
     last_paste: Mutex<Option<(String, String, Instant)>>,
@@ -59,25 +61,27 @@ struct StatusEvent {
 }
 
 fn status(app: &AppHandle, state: &'static str, message: Option<String>) {
-    let _ = app.emit("bolo://state", StatusEvent { state, message });
+    let event = StatusEvent { state, message };
+    *app.state::<AppState>().last_status.lock().unwrap_or_else(|e| e.into_inner()) = event.clone();
+    let _ = app.emit("bolo://state", event);
 }
 
 // ---------- dictation actions ----------
 
 fn act(app: &AppHandle, action: Action) {
     let state = app.state::<AppState>();
-    if matches!(action, Action::Start) && state.mic_test.lock().unwrap().is_some() {
-        status(app, "error", Some("Stop the microphone test before dictating".into()));
-        return;
-    }
     // Read settings up front, in their own statement. Locking them inside the
     // match below kept the guard alive for the whole match, and the second
     // lock deadlocked: Ctrl+Win froze Bolo with no pill.
     let (microphone, app_style) = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (s.microphone.clone(), s.app_style)
     };
-    let mut phase = state.phase.lock().unwrap();
+    let mut phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(action, Action::Start) && state.mic_test.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        status(app, "error", Some("Stop the microphone test before dictating".into()));
+        return;
+    }
     match (action, &mut *phase) {
         (Action::Start, Phase::Idle) => match audio::Recorder::start(app.clone(), microphone) {
             Ok(rec) => {
@@ -109,18 +113,18 @@ fn act(app: &AppHandle, action: Action) {
                 hotkey::set_recording(false);
                 hotkey::set_processing(true);
                 let cancel = Arc::new(AtomicBool::new(false));
-                *state.cancel.lock().unwrap() = cancel.clone();
+                *state.cancel.lock().unwrap_or_else(|e| e.into_inner()) = cancel.clone();
                 let app = app.clone();
                 let command = command || from_keys;
                 tauri::async_runtime::spawn(async move {
                     let id = history::now();
-                    let result = cancellable(cancel.clone(), process(&app, rec, command, target, id, cancel)).await;
+                    let result = process(&app, rec, command, target, id, cancel).await;
                     finish_job(&app, id, result);
                 });
             }
         }
         (Action::Cancel, Phase::Processing) => {
-            state.cancel.lock().unwrap().store(true, Ordering::SeqCst);
+            state.cancel.lock().unwrap_or_else(|e| e.into_inner()).store(true, Ordering::SeqCst);
             status(app, "processing", Some("Cancelling…".into()));
         }
         (Action::Cancel, Phase::Recording { .. }) => {
@@ -139,7 +143,7 @@ fn act(app: &AppHandle, action: Action) {
 fn on_custom_shortcut(app: &AppHandle, pressed: bool) {
     let state = app.state::<AppState>();
     let action = {
-        let phase = state.phase.lock().unwrap();
+        let phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
         match (&*phase, pressed) {
             (Phase::Idle, true) => Some(Action::Start),
             (Phase::Recording { hands_free: true, .. }, true) => Some(Action::Finish { command: false }),
@@ -177,6 +181,7 @@ fn llm_target(s: &Settings, for_command: bool) -> Option<(String, Option<String>
 
 
 async fn cancellable<T>(cancel: Arc<AtomicBool>, work: impl std::future::Future<Output=anyhow::Result<T>>) -> anyhow::Result<T> {
+    anyhow::ensure!(!cancel.load(Ordering::SeqCst), "Cancelled. Saved recordings can be retried from History.");
     tokio::select! {
         result = work => result,
         _ = async { while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(40)).await; } } => anyhow::bail!("Cancelled. Saved recordings can be retried from History."),
@@ -185,15 +190,15 @@ async fn cancellable<T>(cancel: Arc<AtomicBool>, work: impl std::future::Future<
 
 fn update_history(app: &AppHandle, id: u64, f: impl FnOnce(&mut history::Item)) {
     let state = app.state::<AppState>();
-    let s = state.settings.lock().unwrap().clone();
-    let mut store = state.history.lock().unwrap();
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut store = state.history.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(item) = store.items.iter_mut().find(|i| i.id == id) { f(item); }
     if let Err(e) = store.persist(&s) { status(app, "error", Some(format!("History could not be saved: {e}"))); }
     let _ = app.emit("bolo://history", ());
 }
 
 fn finish_job(app: &AppHandle, id: u64, result: anyhow::Result<()>) {
-    *app.state::<AppState>().phase.lock().unwrap() = Phase::Idle;
+    *app.state::<AppState>().phase.lock().unwrap_or_else(|e| e.into_inner()) = Phase::Idle;
     hotkey::set_processing(false);
     match result {
         Ok(()) => status(app, "idle", None),
@@ -208,11 +213,14 @@ fn finish_job(app: &AppHandle, id: u64, result: anyhow::Result<()>) {
 async fn process(app: &AppHandle, rec: audio::Recorder, command: bool, target: style::Target, id: u64, cancel: Arc<AtomicBool>) -> anyhow::Result<()> {
     status(app, "processing", Some("Preparing recording…".into()));
     let samples = tauri::async_runtime::spawn_blocking(move || rec.stop()).await?;
-    if samples.len() < MIN_SAMPLES || !samples.iter().any(|s| s.abs() > 0.0001) { return Ok(()); }
+    anyhow::ensure!(samples.len() >= MIN_SAMPLES,
+        "Recording was too short. Hold the shortcut until you finish speaking.");
+    anyhow::ensure!(samples.iter().any(|s| s.is_finite() && s.abs() > 0.0001),
+        "No microphone sound detected. Check the selected microphone in Settings.");
     let state = app.state::<AppState>();
-    let s = state.settings.lock().unwrap().clone();
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
     {
-        let mut store = state.history.lock().unwrap();
+        let mut store = state.history.lock().unwrap_or_else(|e| e.into_inner());
         store.items.insert(0, history::Item { id, at: id, app: target.app.clone(), kind: target.kind, command, status: "processing".into(),
             has_audio: true, audio: samples.clone(), ..Default::default() });
         store.persist(&s)?;
@@ -223,10 +231,10 @@ async fn process(app: &AppHandle, rec: audio::Recorder, command: bool, target: s
 
 async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, target: style::Target, id: u64, cancel: Arc<AtomicBool>, paste_result: bool) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
-    let s = state.settings.lock().unwrap().clone();
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let terms = s.dictionary_terms();
     status(app, "processing", Some("Transcribing… Esc to cancel".into()));
-    let (raw, engine) = transcribe_any(app, &s, samples, &terms).await?;
+    let (raw, engine) = cancellable(cancel.clone(), transcribe_any(app, &s, samples, &terms)).await?;
     update_history(app, id, |i| { i.raw = raw.clone(); i.engine = engine.into(); });
     if raw.is_empty() || is_noise(&raw) { anyhow::bail!("No speech recognized. Retry the recording from History."); }
     let preference = style::preference(&s, target.kind);
@@ -253,21 +261,22 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
         let selection = tauri::async_runtime::spawn_blocking(move || {
             hotkey::wait_modifiers_released(Duration::from_secs(2));
             anyhow::ensure!(style::still_target(&expected), "Selection changed");
-            paste::copy_selection()
+            paste::copy_selection(&expected)
         }).await??;
         anyhow::ensure!(style::still_target(&target), "Command destination changed. Your dictation is safe in History.");
         status(app, "processing", Some("Editing… Esc to cancel".into()));
-        cleanup::command(&state.http, cleanup::Target { base_url: &base, key: key.as_deref(), model: &model }, &raw, selection.as_deref(), Some(&hint)).await?
+        cancellable(cancel.clone(), cleanup::command(&state.http, cleanup::Target { base_url: &base, key: key.as_deref(), model: &model }, &raw, selection.as_deref(), Some(&hint))).await?
     } else {
         let corrected = cleanup::correct(&raw, &s.corrections);
         let formatted = if s.spoken_formatting { style::spoken_formatting(&corrected) } else { corrected };
         let cleaned = match llm_target(&s, false) {
             Some((base, key, model)) => {
                 status(app, "processing", Some("Formatting… Esc to cancel".into()));
-                let result = cleanup::run(&state.http, cleanup::Target { base_url: &base, key: key.as_deref(), model: &model }, &formatted, &terms, s.hinglish_roman, Some(&hint)).await;
+                let result = cancellable(cancel.clone(), cleanup::run(&state.http, cleanup::Target { base_url: &base, key: key.as_deref(), model: &model }, &formatted, &terms, s.hinglish_roman, Some(&hint))).await;
                 match result {
                     Ok(text) => text,
                     Err(e) => {
+                        if cancel.load(Ordering::SeqCst) { return Err(e); }
                         update_history(app, id, |i| { i.text = formatted.clone(); i.error = format!("Cleanup failed: {e}"); });
                         anyhow::bail!("Cleanup unavailable. Raw text is safe in History; retry to apply your script setting.");
                     }
@@ -279,8 +288,11 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
     };
     // Save before attempting any paste, so errors or changed focus never lose text.
     update_history(app, id, |i| { i.text = text.clone(); i.status = "ready".into(); i.error.clear(); });
+    // Check after corrections/snippets too; never silently paste another script
+    // when the user explicitly selected Roman Hinglish.
+    if !command && s.hinglish_roman { cleanup::ensure_roman_output(&text)?; }
     if !paste_result { return Ok(()); }
-    let same_place = state.last_paste.lock().unwrap().as_ref().is_some_and(|(app, title, at)| {
+    let same_place = state.last_paste.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(app, title, at)| {
         *app == target.app && *title == target.title && at.elapsed() < JOIN_WINDOW
     });
     let after_text = nearby.as_ref().filter(|c| c.selection || !c.before.is_empty()).map(|c| !c.selection && !c.before.ends_with(char::is_whitespace))
@@ -295,7 +307,7 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
         paste::type_text(&to_type, s.restore_clipboard, &expected)
     }).await??;
     hotkey::note_pasted(&typed);
-    *state.last_paste.lock().unwrap() = Some((target.app, target.title, Instant::now()));
+    *state.last_paste.lock().unwrap_or_else(|e| e.into_inner()) = Some((target.app, target.title, Instant::now()));
     update_history(app, id, |i| i.status = "pasted".into());
     Ok(())
 }
@@ -313,18 +325,30 @@ async fn transcribe_any(
         _ => !s.groq_api_key.trim().is_empty(),
     };
     if use_groq {
-        // Let Whisper recognize Hindi in its native script when a cleanup model
-        // can convert it afterwards. Roman prompting can distort Hindi words.
-        let roman_hint = s.hinglish_roman && llm_target(s, false).is_none();
+        // An example transcript biases mixed English/Hindi without forcing
+        // English speech through the Hindi decoder.
+        let roman_hint = s.hinglish_roman;
         match transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, &s.language, terms, roman_hint).await {
+            Ok(t) if cleanup::needs_hindi_retry(&t, &s.language, s.hinglish_roman) => {
+                status(app, "processing", Some("Checking Hindi recognition… Esc to cancel".into()));
+                let retry = transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, "hi", terms, false).await?;
+                return Ok((retry, "groq"));
+            }
             Ok(t) => return Ok((t, "groq")),
-            Err(e) if s.engine == "auto" && models::path(app, &s.local_model).exists() => {
+            Err(e) if s.engine == "auto" && models::path(app, &s.local_model).is_ok_and(|p| p.exists()) => {
                 eprintln!("Groq failed, falling back to local: {e}");
             }
             Err(e) => return Err(e),
         }
     }
-    Ok((transcribe_local(app, s, samples, terms.to_vec()).await?, "local"))
+    let raw = transcribe_local(app, s, samples.clone(), terms.to_vec()).await?;
+    if cleanup::needs_hindi_retry(&raw, &s.language, s.hinglish_roman) {
+        status(app, "processing", Some("Checking Hindi recognition… Esc to cancel".into()));
+        let mut retry_settings = s.clone();
+        retry_settings.language = "hi".into();
+        return Ok((transcribe_local(app, &retry_settings, samples, terms.to_vec()).await?, "local"));
+    }
+    Ok((raw, "local"))
 }
 
 async fn transcribe_local(
@@ -333,12 +357,12 @@ async fn transcribe_local(
     samples: Vec<f32>,
     terms: Vec<String>,
 ) -> anyhow::Result<String> {
-    let model = models::path(app, &s.local_model);
+    let model = models::path(app, &s.local_model)?;
     if !model.exists() {
         anyhow::bail!("Download a speech model in Bolo's settings first");
     }
     let lang = s.language.clone();
-    let hinglish_roman = s.hinglish_roman && llm_target(s, false).is_none();
+    let hinglish_roman = s.hinglish_roman;
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();
@@ -379,26 +403,25 @@ mod reliability_tests {
 /// regular key combo for the OS shortcut API.
 fn apply_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
-    gs.register("Alt+Shift+V").map_err(|e| e.to_string())?;
-    gs.register("Alt+Shift+C").map_err(|e| e.to_string())?;
-    match hotkey::Preset::parse(hotkey) {
-        Some(p) => {
-            hotkey::set_preset(Some(p));
-            Ok(())
-        }
-        None => {
-            hotkey::set_preset(None);
-            gs.register(hotkey).map_err(|e| format!("Could not use shortcut \"{hotkey}\": {e}"))
-        }
+    gs.unregister_all().map_err(|e| e.to_string())?;
+    if let Some(p) = hotkey::Preset::parse(hotkey) {
+        hotkey::set_preset(Some(p));
+    } else {
+        gs.register(hotkey).map_err(|e| format!("Could not use shortcut {hotkey}: {e}"))?;
+        hotkey::set_preset(None);
     }
+    // Optional recovery bindings must never prevent the dictation shortcut.
+    for binding in ["Alt+Shift+V", "Alt+Shift+C"] {
+        if let Err(e) = gs.register(binding) { status(app, "error", Some(format!("{binding} is unavailable: {e}. Dictation remains enabled."))); }
+    }
+    Ok(())
 }
 
 // ---------- commands for the settings window ----------
 
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> Settings {
-    let mut s = state.settings.lock().unwrap().clone();
+    let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if !s.groq_api_key.is_empty() || s.groq_key_saved { s.groq_api_key = "__BOLO_SAVED_KEY__".into(); }
     s
 }
@@ -410,7 +433,9 @@ fn platform() -> &'static str {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, state: tauri::State<AppState>, mut new: Settings) -> Result<(), String> {
-    let old = state.settings.lock().unwrap().clone();
+    let _update = state.settings_updates.lock().unwrap_or_else(|e| e.into_inner());
+    let remove_key = new.groq_api_key.is_empty();
+    let old = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if new.groq_api_key == "__BOLO_SAVED_KEY__" {
         if old.groq_key_saved && old.groq_api_key.is_empty() { return Err("The OS credential store is locked or unavailable. Unlock it or enter your Groq key again.".into()); }
         new.groq_api_key = old.groq_api_key.clone();
@@ -427,9 +452,9 @@ fn save_settings(app: AppHandle, state: tauri::State<AppState>, mut new: Setting
     if old.autostart != new.autostart {
         let al = app.autolaunch();
         let r = if new.autostart { al.enable() } else { al.disable() };
-        r.map_err(|e| format!("Start at login: {e}"))?;
+        if let Err(e) = r { let _ = apply_hotkey(&app, &old.hotkey); return Err(format!("Start at login: {e}")); }
     }
-    if let Err(e) = settings::save(&app, &new) {
+    if let Err(e) = settings::save_with_key_removal(&app, &new, remove_key && old.groq_key_saved) {
         let _ = apply_hotkey(&app, &old.hotkey);
         if old.autostart != new.autostart {
             if old.autostart { let _ = app.autolaunch().enable(); } else { let _ = app.autolaunch().disable(); }
@@ -437,14 +462,16 @@ fn save_settings(app: AppHandle, state: tauri::State<AppState>, mut new: Setting
         return Err(e.to_string());
     }
     new.groq_key_saved = !new.groq_api_key.is_empty();
-    state.history.lock().unwrap().persist(&new).map_err(|e| e.to_string())?;
-    *state.settings.lock().unwrap() = new;
+    *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
+    if let Err(e) = state.history.lock().unwrap_or_else(|e| e.into_inner()).persist(&new) {
+        status(&app, "error", Some(format!("Settings saved, but history storage failed: {e}")));
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn list_models(app: AppHandle) -> Vec<models::ModelStatus> {
-    models::list(&app)
+fn list_models(app: AppHandle) -> Result<Vec<models::ModelStatus>, String> {
+    models::list(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -456,8 +483,8 @@ async fn download_model(app: AppHandle, name: String) -> Result<(), String> {
 #[tauri::command]
 fn delete_model(app: AppHandle, name: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let path = models::path(&app, &name);
-    let mut cache = state.whisper.lock().unwrap();
+    let path = models::path(&app, &name).map_err(|e| e.to_string())?;
+    let mut cache = state.whisper.lock().unwrap_or_else(|e| e.into_inner());
     if cache.as_ref().map(|(p, _)| p == &path).unwrap_or(false) {
         *cache = None;
     }
@@ -465,11 +492,11 @@ fn delete_model(app: AppHandle, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_history(state: tauri::State<AppState>) -> serde_json::Value {
-    let s = state.settings.lock().unwrap().clone();
-    let mut store = state.history.lock().unwrap();
-    let _ = store.persist(&s);
-    serde_json::to_value(&store.items).unwrap_or_else(|_| serde_json::json!([]))
+fn get_history(state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut store = state.history.lock().unwrap_or_else(|e| e.into_inner());
+    store.persist(&s).map_err(|e| e.to_string())?;
+    serde_json::to_value(&store.items).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -479,9 +506,9 @@ fn cancel_processing(app: AppHandle) { act(&app, Action::Cancel); }
 async fn retry_dictation(app: AppHandle, id: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (samples, target) = {
-        let mut phase = state.phase.lock().unwrap();
+        let mut phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
         if !matches!(*phase, Phase::Idle) { return Err("Finish the current dictation first".into()); }
-        let store = state.history.lock().unwrap();
+        let store = state.history.lock().unwrap_or_else(|e| e.into_inner());
         let item = store.items.iter().find(|i| i.id == id).ok_or("Dictation no longer available")?;
         if item.command { return Err("Voice edits cannot be replayed against a different selection. Copy the saved result instead.".into()); }
         let samples = store.audio(id).map_err(|e| e.to_string())?;
@@ -490,10 +517,10 @@ async fn retry_dictation(app: AppHandle, id: u64) -> Result<(), String> {
         (samples, target)
     };
     let cancel = Arc::new(AtomicBool::new(false));
-    *state.cancel.lock().unwrap() = cancel.clone();
+    *state.cancel.lock().unwrap_or_else(|e| e.into_inner()) = cancel.clone();
     hotkey::set_processing(true);
     update_history(&app, id, |i| { i.status = "processing".into(); i.error.clear(); });
-    let result = cancellable(cancel.clone(), process_samples(&app, samples, false, target, id, cancel, false)).await;
+    let result = process_samples(&app, samples, false, target, id, cancel, false).await;
     let error = result.as_ref().err().map(ToString::to_string);
     finish_job(&app, id, result);
     error.map_or(Ok(()), Err)
@@ -502,9 +529,9 @@ async fn retry_dictation(app: AppHandle, id: u64) -> Result<(), String> {
 #[tauri::command]
 fn delete_history(app: AppHandle, id: Option<u64>) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if !matches!(*state.phase.lock().unwrap(), Phase::Idle) { return Err("Finish the current dictation first".into()); }
-    let s = state.settings.lock().unwrap().clone();
-    let mut store = state.history.lock().unwrap();
+    if !matches!(*state.phase.lock().unwrap_or_else(|e| e.into_inner()), Phase::Idle) { return Err("Finish the current dictation first".into()); }
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut store = state.history.lock().unwrap_or_else(|e| e.into_inner());
     store.items.retain(|i| id.is_some_and(|id| i.id != id));
     store.persist(&s).map_err(|e| e.to_string())?;
     let _ = app.emit("bolo://history", ());
@@ -513,10 +540,10 @@ fn delete_history(app: AppHandle, id: Option<u64>) -> Result<(), String> {
 
 fn recover_last(app: &AppHandle, paste_it: bool) {
     let state = app.state::<AppState>();
-    if !matches!(*state.phase.lock().unwrap(), Phase::Idle) { status(app, "error", Some("Finish or cancel processing first".into())); return; }
-    let text = state.history.lock().unwrap().items.iter().find(|i| !i.text.is_empty()).map(|i| i.text.clone());
+    if !matches!(*state.phase.lock().unwrap_or_else(|e| e.into_inner()), Phase::Idle) { status(app, "error", Some("Finish or cancel processing first".into())); return; }
+    let text = state.history.lock().unwrap_or_else(|e| e.into_inner()).items.iter().find(|i| !i.text.is_empty()).map(|i| i.text.clone());
     let Some(text) = text else { status(app, "error", Some("No dictation to recover".into())); return; };
-    let restore = state.settings.lock().unwrap().restore_clipboard;
+    let restore = state.settings.lock().unwrap_or_else(|e| e.into_inner()).restore_clipboard;
     let target = style::detect();
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -527,7 +554,7 @@ fn recover_last(app: &AppHandle, paste_it: bool) {
         if let Err(e) = result { status(&app, "error", Some(e.to_string())); }
         else if paste_it {
             hotkey::note_pasted(&typed);
-            *app.state::<AppState>().last_paste.lock().unwrap() = Some((target.app, target.title, Instant::now()));
+            *app.state::<AppState>().last_paste.lock().unwrap_or_else(|e| e.into_inner()) = Some((target.app, target.title, Instant::now()));
         }
     });
 }
@@ -543,7 +570,8 @@ fn teach_correction(app: AppHandle, heard: String, wanted: String) -> Result<(),
         return Err("Enter a short word or phrase on each side".into());
     }
     let state = app.state::<AppState>();
-    let mut s = state.settings.lock().unwrap();
+    let _update = state.settings_updates.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
     let mut updated = s.clone();
     let mut rules: Vec<_> = updated.corrections.lines().filter(|l| !l.split_once("=>").is_some_and(|(a,_)| a.trim().eq_ignore_ascii_case(heard))).map(str::to_string).collect();
     rules.push(format!("{heard} => {wanted}"));
@@ -556,12 +584,31 @@ fn teach_correction(app: AppHandle, heard: String, wanted: String) -> Result<(),
 #[tauri::command]
 fn microphone_test(app: AppHandle, start: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if !matches!(*state.phase.lock().unwrap(), Phase::Idle) { return Err("Finish dictation first".into()); }
-    let mut test = state.mic_test.lock().unwrap();
-    if start {
-        if test.is_none() { *test = Some(audio::Recorder::start(app.clone(), state.settings.lock().unwrap().microphone.clone()).map_err(|e| e.to_string())?); }
-    } else { test.take(); }
+    let microphone = state.settings.lock().unwrap_or_else(|e| e.into_inner()).microphone.clone();
+    let phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
+    if start && !matches!(*phase, Phase::Idle) { return Err("Finish dictation first".into()); }
+    let mut test = state.mic_test.lock().unwrap_or_else(|e| e.into_inner());
+    if start && test.is_none() {
+        let started = Instant::now();
+        *test = Some((started, audio::Recorder::start(app.clone(), microphone).map_err(|e| e.to_string())?));
+        let app = app.clone();
+        // A hidden WebView can throttle JS timers. Stop in Rust as well.
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let state = app.state::<AppState>();
+            let mut test = state.mic_test.lock().unwrap_or_else(|e| e.into_inner());
+            if test.as_ref().is_some_and(|(at, _)| *at == started) {
+                test.take();
+                let _ = app.emit("bolo://mic-test-ended", ());
+            }
+        });
+    } else if !start { test.take(); }
     Ok(())
+}
+
+#[tauri::command]
+fn get_status(state: tauri::State<AppState>) -> StatusEvent {
+    state.last_status.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[derive(Serialize)]
@@ -605,7 +652,7 @@ fn place_pill(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
         .plugin(
@@ -624,7 +671,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle().clone();
-            let s = settings::load(&handle);
+            let (s, warning) = settings::load(&handle);
             let hotkey_str = s.hotkey.clone();
             app.manage(AppState {
                 history: Mutex::new(history::Store::new(handle.path().app_data_dir()?.join("history"), &s)),
@@ -633,6 +680,8 @@ pub fn run() {
                 whisper: Mutex::new(None),
                 cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
                 mic_test: Mutex::new(None),
+                settings_updates: Mutex::new(()),
+                last_status: Mutex::new(StatusEvent { state: if warning.is_some() { "error" } else { "idle" }, message: warning }),
                 http: reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(60)).build()?,
                 last_paste: Mutex::new(None),
             });
@@ -642,9 +691,9 @@ pub fn run() {
                 loop {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     let state = retention.state::<AppState>();
-                    let s = state.settings.lock().unwrap().clone();
-                    if let Err(e) = state.history.lock().unwrap().persist(&s) {
-                        eprintln!("History retention failed: {e}");
+                    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Err(e) = state.history.lock().unwrap_or_else(|e| e.into_inner()).persist(&s) {
+                        status(&retention, "error", Some(format!("History retention failed: {e}")));
                     }
                 }
             });
@@ -663,14 +712,14 @@ pub fn run() {
                 status(&handle, "error", Some(e));
             }
             if let Err(e) = apply_hotkey(&handle, &hotkey_str) {
-                eprintln!("{e}");
+                status(&handle, "error", Some(e));
             }
 
             let open = MenuItem::with_id(app, "open", "Open Bolo", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
             TrayIconBuilder::with_id("tray")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(app.default_window_icon().ok_or_else(|| anyhow::anyhow!("Bolo tray icon is missing"))?.clone())
                 .tooltip("Bolo — hold your shortcut and speak")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -690,8 +739,8 @@ pub fn run() {
             let warm = handle.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let state = warm.state::<AppState>();
-                let s = state.settings.lock().unwrap().clone();
-                let model = models::path(&warm, &s.local_model);
+                let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let Ok(model) = models::path(&warm, &s.local_model) else { return; };
                 let wants_local = s.engine == "local" || s.groq_api_key.trim().is_empty();
                 if wants_local && model.exists() {
                     let silence = vec![0.0f32; audio::TARGET_RATE as usize];
@@ -715,7 +764,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_settings,
+            get_settings, get_status,
             save_settings,
             platform,
             list_models,
@@ -724,6 +773,17 @@ pub fn run() {
             get_history
             ,cancel_processing, retry_dictation, delete_history, list_microphones, microphone_test, check_update, teach_correction
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Bolo");
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        eprintln!("Bolo could not start: {error}");
+        // If setup itself fails there is no pill yet. Show an ordinary Windows
+        // error instead of aborting silently in a release build without a console.
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let message: Vec<u16> = format!("Bolo could not start: {error}").encode_utf16().chain(Some(0)).collect();
+            let title: Vec<u16> = "Bolo".encode_utf16().chain(Some(0)).collect();
+            MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+        }
+    }
 }

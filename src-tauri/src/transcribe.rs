@@ -49,7 +49,10 @@ fn local_with(
     hinglish_roman: bool,
     trim: bool,
 ) -> Result<String> {
-    let mut guard = cache.lock().unwrap();
+    if audio.is_empty() { return Ok(String::new()); }
+    anyhow::ensure!(!language.contains('\0') && terms.iter().all(|t| !t.contains('\0')),
+        "Language or vocabulary contains an invalid null character. Remove it in Settings.");
+    let mut guard = cache.lock().map_err(|_| anyhow!("Offline decoder failed. Restart Bolo and retry from History."))?;
     if guard.as_ref().map(|(p, _)| p.as_path()) != Some(model) {
         let mut cparams = WhisperContextParameters::default();
         cparams.flash_attn(true);
@@ -57,7 +60,7 @@ fn local_with(
         .map_err(|e| anyhow!("Could not load model: {e:?}"))?;
         *guard = Some((model.to_path_buf(), ctx));
     }
-    let (_, ctx) = guard.as_ref().unwrap();
+    let (_, ctx) = guard.as_ref().context("Offline model is unavailable")?;
     let mut state = ctx
         .create_state()
         .map_err(|e| anyhow!("whisper state: {e:?}"))?;
@@ -128,6 +131,82 @@ fn wav_bytes(audio: &[f32]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn compare_native_and_roman_prompts() {
+        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_MODELS_DIR")) else { return; };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+            let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
+                .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
+            for name in ["short-hindi", "meeting", "mixed-roman", "mixed-long", "english"] {
+                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
+                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
+                for (label, prompt) in [
+                    ("roman", transcription_prompt(&terms, true)),
+                    ("native", Some(format!("हाँ, मैं Hindi और English में बात करता हूँ। कल meeting के बाद report भेज देना। Vocabulary: {}.", terms.join(", ")))),
+                ] {
+                    let raw = groq_with_prompt(&http, &key, "whisper-large-v3-turbo", &samples, "auto", prompt).await.unwrap();
+                    eprintln!("{name} {label}: {raw}");
+                    let target = crate::cleanup::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+                    let cleaned = crate::cleanup::run(&http, target, &raw, &terms, true, None).await.unwrap();
+                    eprintln!("{name} {label} cleaned: {cleaned}");
+                    assert!(!raw.is_empty());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn compare_whisper_accuracy() {
+        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_MODELS_DIR")) else { return; };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+            let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
+                .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
+            for name in ["short-hindi", "mixed-roman", "english"] {
+                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
+                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
+                for model in ["whisper-large-v3-turbo", "whisper-large-v3"] {
+                    let started = std::time::Instant::now();
+                    let raw = groq(&http, &key, model, &samples, "auto", &terms, true).await.unwrap();
+                    eprintln!("{name} {model} {:?}: {raw}", started.elapsed());
+                    assert!(!raw.is_empty());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn compare_mixed_speech_prompts() {
+        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_SPEECH_DIR")) else { return; };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+            for name in ["mixed-roman", "hindi", "english"] {
+                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
+                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
+                for (language, roman) in [("auto", false), ("auto", true), ("hi", false)] {
+                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, language, &[], roman).await.unwrap();
+                    eprintln!("{name} language={language} roman_prompt={roman}: {raw}");
+                }
+                let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
+                    .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
+                let mut raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, "auto", &terms, true).await.unwrap();
+                if crate::cleanup::needs_hindi_retry(&raw, "auto", true) {
+                    raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, "hi", &terms, false).await.unwrap();
+                }
+                let target = crate::cleanup::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+                let out = crate::cleanup::run(&http, target, &raw, &terms, true, None).await.unwrap();
+                eprintln!("{name} corrected pipeline: {out}");
+                crate::cleanup::ensure_roman_output(&out).unwrap();
+                if name == "english" { assert!(out.to_lowercase().contains("document") && out.to_lowercase().contains("friday")); }
+                if name == "mixed-roman" { assert!(out.to_lowercase().contains("chatgpt") && out.to_lowercase().contains("kal"), "{out}"); }
+            }
+        });
+    }
+
     /// Optional full Groq speech + cleanup check. Supply 16 kHz mono i16 WAVs
     /// named hindi.wav, mixed.wav and english.wav in BOLO_TEST_SPEECH_DIR.
     #[test]
@@ -149,8 +228,7 @@ mod tests {
                 assert_eq!(reader.spec().channels, 1);
                 let audio: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
                 for roman in [true, false] {
-                    // The app leaves script conversion to cleanup when available.
-                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &audio, "auto", &[], false).await.unwrap();
+                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &audio, "auto", &[], roman).await.unwrap();
                     let out = crate::cleanup::run(&http, target, &raw, &[], roman, None).await.unwrap();
                     eprintln!("{name} roman={roman}: raw={raw} -> {out}");
                     assert!(!out.is_empty());
@@ -195,6 +273,21 @@ mod tests {
         let bytes = wav_bytes(&[0.0, 0.5, -0.5]).unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
     }
+
+    #[test]
+    fn empty_audio_does_not_load_a_model() {
+        let cache = Mutex::new(None);
+        assert_eq!(local(&cache, Path::new("missing-model"), &[], "auto", &[], false).unwrap(), "");
+    }
+
+    #[test]
+    fn invalid_prompt_is_rejected_before_whisper_can_panic() {
+        let cache = Mutex::new(None);
+        for (language, terms) in [("en\0", vec![]), ("auto", vec!["bad\0word".into()])] {
+            let error = local(&cache, Path::new("missing-model"), &[0.5], language, &terms, false).unwrap_err();
+            assert!(error.to_string().contains("null character"));
+        }
+    }
 }
 
 /// Groq's hosted Whisper (OpenAI-compatible endpoint).
@@ -207,6 +300,13 @@ pub async fn groq(
     terms: &[String],
     hinglish_roman: bool,
 ) -> Result<String> {
+    groq_with_prompt(http, key, model, audio, language, transcription_prompt(terms, hinglish_roman)).await
+}
+
+async fn groq_with_prompt(
+    http: &reqwest::Client, key: &str, model: &str, audio: &[f32],
+    language: &str, prompt: Option<String>,
+) -> Result<String> {
     let part = reqwest::multipart::Part::bytes(wav_bytes(audio)?)
         .file_name("audio.wav")
         .mime_str("audio/wav")?;
@@ -218,7 +318,7 @@ pub async fn groq(
     if language != "auto" {
         form = form.text("language", language.to_string());
     }
-    if let Some(p) = transcription_prompt(terms, hinglish_roman) {
+    if let Some(p) = prompt {
         form = form.text("prompt", p);
     }
     let res = http
@@ -228,10 +328,10 @@ pub async fn groq(
         .send()
         .await?;
     let status = res.status();
-    let body: serde_json::Value = res.json().await.unwrap_or_default();
+    let body: serde_json::Value = res.json().await.context("Groq returned invalid JSON")?;
     if !status.is_success() {
         let msg = body["error"]["message"].as_str().unwrap_or("request failed");
         return Err(anyhow!("Groq {status}: {msg}"));
     }
-    Ok(body["text"].as_str().unwrap_or_default().trim().to_string())
+    Ok(body["text"].as_str().context("Groq response contains no transcript")?.trim().to_string())
 }

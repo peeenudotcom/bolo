@@ -11,7 +11,9 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, LazyLock, Mutex, OnceLock};
+use std::sync::{mpsc, OnceLock};
+use std::cell::RefCell;
+use std::sync::atomic::AtomicU8;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -274,72 +276,61 @@ impl Machine {
 
 // ---------- global wiring ----------
 
-static MACHINE: LazyLock<Mutex<Machine>> = LazyLock::new(|| Mutex::new(Machine::new()));
+// Callback-owned state: no application mutex can block the keyboard hook.
+thread_local! { static MACHINE: RefCell<Machine> = RefCell::new(Machine::new()); }
+static PRESET: AtomicU8 = AtomicU8::new(0);
+static RESET: AtomicBool = AtomicBool::new(false);
+static MODIFIERS_DOWN: AtomicBool = AtomicBool::new(false);
 static RECORDING: AtomicBool = AtomicBool::new(false);
-static TX: OnceLock<Mutex<mpsc::Sender<Action>>> = OnceLock::new();
+static TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
 
 pub fn set_preset(p: Option<Preset>) {
-    let mut m = MACHINE.lock().unwrap();
-    m.preset = p;
-    m.phase = Phase::Idle;
+    PRESET.store(match p { None => 0, Some(Preset::CtrlWin) => 1, Some(Preset::Fn) => 2,
+        Some(Preset::RightCtrl) => 3, Some(Preset::RightAlt) => 4, Some(Preset::RightCmd) => 5 }, Ordering::SeqCst);
+    RESET.store(true, Ordering::SeqCst);
 }
 
 pub fn set_recording(on: bool) {
-    RECORDING.store(on, Ordering::SeqCst);
+    if RECORDING.swap(on, Ordering::SeqCst) && !on { RESET.store(true, Ordering::SeqCst); }
 }
 
-/// Waits (up to `max`) until the user lets go of every modifier key, so a
-/// synthetic Ctrl+V isn't turned into Ctrl+Win+V or similar.
 pub fn wait_modifiers_released(max: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < max {
-        prune_stale();
-        if !MACHINE.lock().unwrap().modifiers_down() {
-            return true;
-        }
+        #[cfg(windows)]
+        let held = [K::LCtrl, K::RCtrl, K::LAlt, K::RAlt, K::LWin, K::RWin, K::LShift, K::RShift]
+            .iter().any(|k| win::is_down(*k).unwrap_or(false));
+        #[cfg(not(windows))]
+        let held = MODIFIERS_DOWN.load(Ordering::SeqCst);
+        if !held { return true; }
         std::thread::sleep(Duration::from_millis(20));
     }
     false
 }
 
 fn handle(k: K, down: bool) -> Feedback {
-    if k == K::Esc && down && PROCESSING.load(Ordering::SeqCst) {
-        if let Some(tx) = TX.get() { let _ = tx.lock().unwrap().send(Action::Cancel); }
-        return Feedback { suppress: true, mask: false };
-    }
-    prune_stale();
-    let mut out = Vec::new();
-    let fb = {
-        let mut m = MACHINE.lock().unwrap();
+    let mut out = Vec::with_capacity(2);
+    let fb = MACHINE.with(|cell| {
+        let Ok(mut m) = cell.try_borrow_mut() else { return Feedback::default(); };
+        if RESET.swap(false, Ordering::SeqCst) { m.phase = Phase::Idle; }
+        m.preset = match PRESET.load(Ordering::SeqCst) { 1 => Some(Preset::CtrlWin), 2 => Some(Preset::Fn),
+            3 => Some(Preset::RightCtrl), 4 => Some(Preset::RightAlt), 5 => Some(Preset::RightCmd), _ => None };
+        #[cfg(windows)]
+        m.pressed.retain(|key| *key == k || win::is_down(*key).unwrap_or(true));
         let shortcut = m.shortcut_held();
-        let fb = m.feed(k, down, RECORDING.load(Ordering::SeqCst), &mut out);
-        if down && !fb.suppress {
-            note_typed(k, shortcut);
-        }
+        let processing_cancel = k == K::Esc && down && PROCESSING.load(Ordering::SeqCst);
+        let fb = m.feed(k, down, RECORDING.load(Ordering::SeqCst) || processing_cancel, &mut out);
+        MODIFIERS_DOWN.store(m.modifiers_down(), Ordering::SeqCst);
+        if down && !fb.suppress { note_typed(k, shortcut); }
         fb
-    };
-    if let Some(tx) = TX.get() {
-        let tx = tx.lock().unwrap();
-        for a in out {
-            let _ = tx.send(a);
-        }
-    }
+    });
+    if let Some(tx) = TX.get() { for action in out { let _ = tx.send(action); } }
     fb
-}
-
-/// Drops keys the OS says are no longer held (e.g. a key-up lost to the lock
-/// screen), so a stuck Win key can't make Ctrl alone start dictation.
-fn prune_stale() {
-    #[cfg(windows)]
-    {
-        let mut m = MACHINE.lock().unwrap();
-        m.pressed.retain(|k| win::is_down(*k).unwrap_or(true));
-    }
 }
 
 /// Installs the keyboard hook on its own thread. Actions arrive on `tx`.
 pub fn start(tx: mpsc::Sender<Action>) -> Result<(), String> {
-    TX.set(Mutex::new(tx)).map_err(|_| "hotkey already started".to_string())?;
+    TX.set(tx).map_err(|_| "hotkey already started".to_string())?;
     backend_start()
 }
 
@@ -610,6 +601,26 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_resets_after_automatic_stop_and_swallows_escape_release() {
+        // Fn has no GetAsyncKeyState mapping, so no real keyboard is exercised.
+        set_preset(Some(Preset::Fn));
+        handle(K::Fn, true);
+        set_recording(true);
+        handle(K::Space, true);
+        handle(K::Space, false);
+        handle(K::Fn, false);
+        set_recording(false); // the two-minute limit or a failed/cancelled job
+        handle(K::Fn, true);
+        MACHINE.with(|m| assert!(matches!(m.borrow().phase, Phase::Holding { .. })));
+        handle(K::Fn, false);
+        PROCESSING.store(true, Ordering::SeqCst);
+        assert!(handle(K::Esc, true).suppress);
+        PROCESSING.store(false, Ordering::SeqCst);
+        assert!(handle(K::Esc, false).suppress);
+        set_preset(None);
+    }
 
     fn run(m: &mut Machine, keys: &[(K, bool)], recording: bool) -> Vec<Action> {
         let mut out = Vec::new();
