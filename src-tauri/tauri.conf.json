@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bolo",
+  "version": "0.1.0",
+  "identifier": "com.peeenudotcom.bolo",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Bolo",
+        "url": "index.html",
+        "width": 600,
+        "height": 780,
+        "minWidth": 460,
+        "minHeight": 520,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "pill",
+        "title": "Bolo pill",
+        "url": "pill.html",
+        "width": 240,
+        "height": 64,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "focusable": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "Free voice dictation: hold a key, speak, and your words appear.",
+    "longDescription": "Bolo is a free, open-source voice dictation app. Hold a shortcut, speak, and clean text is typed into whatever app you're using. Works offline with Whisper, or with a free Groq key for extra speed.",
+    "category": "Productivity",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bolo</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Bolo</h1>
+        <p class="lede" id="lede">Hold your shortcut anywhere, speak, and let go.</p>
+      </div>
+      <span class="save-state" id="save-state" aria-live="polite"></span>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="general">General</button>
+      <button role="tab" aria-selected="false" data-tab="words">Words</button>
+      <button role="tab" aria-selected="false" data-tab="history">History</button>
+    </nav>
+
+    <main>
+      <section data-panel="general">
+        <div class="group">
+          <h2>Shortcut</h2>
+          <div class="row">
+            <div class="label">
+              <span>Hold to talk</span>
+              <small id="hotkey-help"></small>
+            </div>
+            <select id="hotkey-preset" aria-label="Shortcut"></select>
+          </div>
+          <div class="row" id="custom-row" hidden>
+            <div class="label">
+              <span>Your key combo</span>
+              <small>Click, then press the keys. Tap it for hands-free.</small>
+            </div>
+            <button class="hotkey" id="hotkey" type="button">Ctrl+Shift+Space</button>
+          </div>
+          <ul class="cheats" id="cheats"></ul>
+          <label class="row">
+            <div class="label"><span>Start Bolo when I log in</span></div>
+            <input type="checkbox" class="switch" data-key="autostart" />
+          </label>
+        </div>
+
+        <div class="group">
+          <h2>Speech to text</h2>
+          <div class="row">
+            <div class="label">
+              <span>Engine</span>
+              <small id="engine-help">Uses Groq when you add a key, otherwise runs offline.</small>
+            </div>
+            <select data-key="engine">
+              <option value="auto">Automatic</option>
+              <option value="local">Offline only</option>
+              <option value="groq">Groq only</option>
+            </select>
+          </div>
+          <div class="row">
+            <div class="label">
+              <span>Language</span>
+              <small>Automatic works for most people.</small>
+            </div>
+            <select data-key="language">
+              <option value="auto">Automatic</option>
+              <option value="en">English</option>
+              <option value="hi">Hindi</option>
+              <option value="pa">Punjabi</option>
+              <option value="ur">Urdu</option>
+              <option value="bn">Bengali</option>
+              <option value="ta">Tamil</option>
+              <option value="te">Telugu</option>
+              <option value="mr">Marathi</option>
+              <option value="gu">Gujarati</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+            </select>
+          </div>
+          <div class="row stack">
+            <div class="label">
+              <span>Groq API key <em>optional, free</em></span>
+              <small>Makes dictation near-instant and more accurate. Get one at <a href="https://console.groq.com/keys" data-external>console.groq.com/keys</a>.</small>
+            </div>
+            <input type="password" data-key="groq_api_key" placeholder="gsk_…" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <div class="group">
+          <h2>Offline models</h2>
+          <p class="hint">Pick one to use without internet. Bigger is more accurate but slower.</p>
+          <ul class="models" id="models"></ul>
+        </div>
+
+        <div class="group">
+          <h2>Smart formatting</h2>
+          <label class="row">
+            <div class="label">
+              <span>Match the app I'm typing in</span>
+              <small>Casual in WhatsApp and Slack, full sentences in email, literal in code editors.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="app_style" />
+          </label>
+          <label class="row">
+            <div class="label">
+              <span>Spoken formatting</span>
+              <small>Say “new line”, “new paragraph”, “bullet point” or “heart emoji”.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="spoken_formatting" />
+          </label>
+        </div>
+
+        <div class="group">
+          <h2>Cleanup</h2>
+          <div class="row">
+            <div class="label">
+              <span>Polish my words with AI</span>
+              <small>Removes “um”s, fixes punctuation, applies your corrections.</small>
+            </div>
+            <select data-key="cleanup">
+              <option value="off">Off</option>
+              <option value="groq">Groq (needs key)</option>
+              <option value="ollama">Ollama (offline)</option>
+            </select>
+          </div>
+          <div class="row" data-show="cleanup=groq">
+            <div class="label"><span>Groq model</span></div>
+            <input type="text" data-key="groq_cleanup_model" spellcheck="false" />
+          </div>
+          <div class="row" data-show="cleanup=ollama">
+            <div class="label"><span>Ollama address</span></div>
+            <input type="text" data-key="ollama_url" spellcheck="false" />
+          </div>
+          <div class="row" data-show="cleanup=ollama">
+            <div class="label"><span>Ollama model</span></div>
+            <input type="text" data-key="ollama_model" spellcheck="false" />
+          </div>
+          <label class="row">
+            <div class="label">
+              <span>Write Hindi as Hinglish</span>
+              <small>“kal milte hain” instead of “कल मिलते हैं”. Needs cleanup on.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="hinglish_roman" />
+          </label>
+          <label class="row">
+            <div class="label">
+              <span>Keep my clipboard</span>
+              <small>Puts back whatever you had copied after Bolo types.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="restore_clipboard" />
+          </label>
+        </div>
+      </section>
+
+      <section data-panel="words" hidden>
+        <div class="group">
+          <h2>Dictionary</h2>
+          <p class="hint">Names, brands and jargon Bolo should spell right. One per line.</p>
+          <textarea data-key="dictionary" rows="7" spellcheck="false" placeholder="Peeenu&#10;Tauri&#10;Ludhiana"></textarea>
+        </div>
+        <div class="group">
+          <h2>Snippets</h2>
+          <p class="hint">Say the phrase on the left and Bolo types the right. One per line, use <code>\n</code> for a new line.</p>
+          <textarea data-key="snippets" rows="7" spellcheck="false" placeholder="my email => you@example.com&#10;my address => 12 Mall Road, Ludhiana"></textarea>
+        </div>
+      </section>
+
+      <section data-panel="history" hidden>
+        <div class="group">
+          <h2>Recent dictations</h2>
+          <p class="hint">Kept until you quit Bolo. Click one to copy it.</p>
+          <ul class="history" id="history"></ul>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

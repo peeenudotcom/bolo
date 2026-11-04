@@ -1,0 +1,596 @@
+//! Hold-to-talk shortcuts made only of modifier keys (Ctrl+Win, Fn, Right Ctrl…).
+//! OS shortcut APIs can't express those, so a low-level keyboard hook feeds
+//! every key event into a small state machine that emits dictation actions.
+//!
+//! With preset P:
+//! - hold P            → dictate, release to finish
+//! - P + Space         → hands-free; press P again to finish
+//! - P + Alt (Option)  → command mode (edit the selection by voice)
+//! - Esc while recording → cancel
+//! - P + any other key → treated as a normal shortcut; recording is dropped
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum K {
+    LCtrl,
+    RCtrl,
+    LAlt,
+    RAlt,
+    LWin,
+    RWin,
+    LShift,
+    RShift,
+    Fn,
+    Space,
+    Esc,
+    Other,
+}
+
+impl K {
+    fn is_modifier(self) -> bool {
+        !matches!(self, K::Space | K::Esc | K::Other)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Preset {
+    CtrlWin,
+    Fn,
+    RightCtrl,
+    RightAlt,
+    RightCmd,
+}
+
+impl Preset {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "hold:ctrl+win" | "hold:ctrl+super" => Some(Self::CtrlWin),
+            "hold:fn" => Some(Self::Fn),
+            "hold:right-ctrl" => Some(Self::RightCtrl),
+            "hold:right-alt" => Some(Self::RightAlt),
+            "hold:right-cmd" => Some(Self::RightCmd),
+            _ => None,
+        }
+    }
+
+    fn active(self, p: &HashSet<K>) -> bool {
+        let has = |k| p.contains(&k);
+        match self {
+            Self::CtrlWin => (has(K::LCtrl) || has(K::RCtrl)) && (has(K::LWin) || has(K::RWin)),
+            Self::Fn => has(K::Fn),
+            Self::RightCtrl => has(K::RCtrl),
+            Self::RightAlt => has(K::RAlt),
+            Self::RightCmd => has(K::RWin),
+        }
+    }
+
+    /// The extra key that turns dictation into command mode.
+    fn command_held(self, p: &HashSet<K>) -> bool {
+        match self {
+            Self::RightAlt => p.contains(&K::LShift) || p.contains(&K::RShift),
+            _ => p.contains(&K::LAlt) || p.contains(&K::RAlt),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Start,
+    CommandMode,
+    HandsFree,
+    Finish { command: bool },
+    Cancel,
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Feedback {
+    /// Swallow this key event so the focused app never sees it.
+    pub suppress: bool,
+    /// Send a dummy key before this release so Windows doesn't open the Start
+    /// menu (Win released) or the menu bar (Alt released).
+    pub mask: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    Holding { command: bool },
+    HandsFree { command: bool },
+    /// Waiting for the shortcut keys to be let go before listening again.
+    Blocked,
+}
+
+#[derive(Debug)]
+pub struct Machine {
+    pressed: HashSet<K>,
+    phase: Phase,
+    preset: Option<Preset>,
+    swallowed: HashSet<K>,
+    chorded: HashSet<K>,
+}
+
+impl Machine {
+    pub fn new() -> Self {
+        Self {
+            pressed: HashSet::new(),
+            phase: Phase::Idle,
+            preset: None,
+            swallowed: HashSet::new(),
+            chorded: HashSet::new(),
+        }
+    }
+
+    pub fn feed(&mut self, k: K, down: bool, recording: bool, out: &mut Vec<Action>) -> Feedback {
+        let mut fb = Feedback::default();
+        if !down && self.swallowed.remove(&k) {
+            fb.suppress = true;
+        }
+        let was_active = self.preset.is_some_and(|p| p.active(&self.pressed));
+
+        if down {
+            let repeat = self.pressed.contains(&k);
+            if k == K::Esc && recording && !repeat {
+                out.push(Action::Cancel);
+                self.phase = if was_active { Phase::Blocked } else { Phase::Idle };
+                self.swallowed.insert(K::Esc);
+                fb.suppress = true;
+                return fb;
+            }
+            self.pressed.insert(k);
+        } else {
+            self.pressed.remove(&k);
+        }
+
+        let Some(p) = self.preset else {
+            return fb;
+        };
+        let active = p.active(&self.pressed);
+        let fresh = active && !was_active;
+
+        match self.phase {
+            Phase::Idle if fresh => {
+                let command = p.command_held(&self.pressed);
+                self.phase = Phase::Holding { command };
+                out.push(Action::Start);
+                if command {
+                    out.push(Action::CommandMode);
+                }
+            }
+            Phase::Holding { command } => {
+                if !active {
+                    out.push(Action::Finish { command });
+                    self.phase = Phase::Idle;
+                } else if down && k == K::Space {
+                    self.phase = Phase::HandsFree { command };
+                    out.push(Action::HandsFree);
+                    self.swallowed.insert(K::Space);
+                    fb.suppress = true;
+                } else if down && !command && p.command_held(&self.pressed) {
+                    self.phase = Phase::Holding { command: true };
+                    out.push(Action::CommandMode);
+                } else if down && k == K::Other {
+                    // Ctrl+Win+D and friends: the user wanted a normal shortcut.
+                    out.push(Action::Cancel);
+                    self.phase = Phase::Blocked;
+                }
+            }
+            Phase::HandsFree { command } => {
+                if fresh {
+                    out.push(Action::Finish { command });
+                    self.phase = Phase::Blocked;
+                } else if down && k == K::Space && active {
+                    self.swallowed.insert(K::Space);
+                    fb.suppress = true;
+                }
+            }
+            Phase::Blocked if !active => self.phase = Phase::Idle,
+            _ => {}
+        }
+
+        if active {
+            for m in [K::LWin, K::RWin, K::LAlt, K::RAlt] {
+                if self.pressed.contains(&m) {
+                    self.chorded.insert(m);
+                }
+            }
+        }
+        if !down && self.chorded.remove(&k) {
+            fb.mask = true;
+        }
+        fb
+    }
+
+    fn modifiers_down(&self) -> bool {
+        self.pressed.iter().any(|k| k.is_modifier())
+    }
+}
+
+// ---------- global wiring ----------
+
+static MACHINE: LazyLock<Mutex<Machine>> = LazyLock::new(|| Mutex::new(Machine::new()));
+static RECORDING: AtomicBool = AtomicBool::new(false);
+static TX: OnceLock<Mutex<mpsc::Sender<Action>>> = OnceLock::new();
+
+pub fn set_preset(p: Option<Preset>) {
+    let mut m = MACHINE.lock().unwrap();
+    m.preset = p;
+    m.phase = Phase::Idle;
+}
+
+pub fn set_recording(on: bool) {
+    RECORDING.store(on, Ordering::SeqCst);
+}
+
+/// Waits (up to `max`) until the user lets go of every modifier key, so a
+/// synthetic Ctrl+V isn't turned into Ctrl+Win+V or similar.
+pub fn wait_modifiers_released(max: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < max {
+        prune_stale();
+        if !MACHINE.lock().unwrap().modifiers_down() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn handle(k: K, down: bool) -> Feedback {
+    prune_stale();
+    let mut out = Vec::new();
+    let fb = MACHINE
+        .lock()
+        .unwrap()
+        .feed(k, down, RECORDING.load(Ordering::SeqCst), &mut out);
+    if let Some(tx) = TX.get() {
+        let tx = tx.lock().unwrap();
+        for a in out {
+            let _ = tx.send(a);
+        }
+    }
+    fb
+}
+
+/// Drops keys the OS says are no longer held (e.g. a key-up lost to the lock
+/// screen), so a stuck Win key can't make Ctrl alone start dictation.
+fn prune_stale() {
+    #[cfg(windows)]
+    {
+        let mut m = MACHINE.lock().unwrap();
+        m.pressed.retain(|k| win::is_down(*k).unwrap_or(true));
+    }
+}
+
+/// Installs the keyboard hook on its own thread. Actions arrive on `tx`.
+pub fn start(tx: mpsc::Sender<Action>) -> Result<(), String> {
+    TX.set(Mutex::new(tx)).map_err(|_| "hotkey already started".to_string())?;
+    backend_start()
+}
+
+#[cfg(windows)]
+fn backend_start() -> Result<(), String> {
+    win::start()
+}
+#[cfg(target_os = "macos")]
+fn backend_start() -> Result<(), String> {
+    mac::start()
+}
+#[cfg(target_os = "linux")]
+fn backend_start() -> Result<(), String> {
+    linux::start()
+}
+
+// ---------- Windows: WH_KEYBOARD_LL ----------
+
+#[cfg(windows)]
+mod win {
+    use super::{handle, K};
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
+        HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
+        WM_SYSKEYDOWN,
+    };
+
+    const MASK_VK: u16 = 0xE8; // unassigned virtual key
+
+    fn map(vk: u32) -> K {
+        match vk {
+            0xA2 | 0x11 => K::LCtrl,
+            0xA3 => K::RCtrl,
+            0xA4 | 0x12 => K::LAlt,
+            0xA5 => K::RAlt,
+            0x5B => K::LWin,
+            0x5C => K::RWin,
+            0xA0 | 0x10 => K::LShift,
+            0xA1 => K::RShift,
+            0x20 => K::Space,
+            0x1B => K::Esc,
+            _ => K::Other,
+        }
+    }
+
+    fn vk_of(k: K) -> Option<i32> {
+        Some(match k {
+            K::LCtrl => 0xA2,
+            K::RCtrl => 0xA3,
+            K::LAlt => 0xA4,
+            K::RAlt => 0xA5,
+            K::LWin => 0x5B,
+            K::RWin => 0x5C,
+            K::LShift => 0xA0,
+            K::RShift => 0xA1,
+            K::Space => 0x20,
+            K::Esc => 0x1B,
+            K::Fn | K::Other => return None,
+        })
+    }
+
+    pub fn is_down(k: K) -> Option<bool> {
+        vk_of(k).map(|vk| unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000 != 0)
+    }
+
+    fn send_mask() {
+        let key = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT { wVk: MASK_VK, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            },
+        };
+        let inputs = [key(0), key(KEYEVENTF_KEYUP)];
+        unsafe {
+            SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
+    unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == HC_ACTION as i32 {
+            let kb = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            if kb.flags & LLKHF_INJECTED == 0 && kb.vkCode != MASK_VK as u32 {
+                let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+                let fb = handle(map(kb.vkCode), down);
+                if fb.mask {
+                    send_mask();
+                }
+                if fb.suppress {
+                    return 1;
+                }
+            }
+        }
+        unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
+    }
+
+    pub fn start() -> Result<(), String> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("bolo-keyboard-hook".into())
+            .spawn(move || unsafe {
+                let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0);
+                let _ = ready_tx.send(!h.is_null());
+                if h.is_null() {
+                    return;
+                }
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        match ready_rx.recv() {
+            Ok(true) => Ok(()),
+            _ => Err("Could not install the keyboard hook".into()),
+        }
+    }
+}
+
+// ---------- macOS: CGEventTap (needs Accessibility permission) ----------
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{handle, K};
+    use core_foundation::runloop::CFRunLoop;
+    use core_graphics::event::{
+        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+        CallbackResult, EventField,
+    };
+
+    // Device-dependent modifier bits, which tell left and right apart.
+    fn flag_bit(keycode: i64) -> Option<(K, u64)> {
+        Some(match keycode {
+            59 => (K::LCtrl, 0x0000_0001),
+            62 => (K::RCtrl, 0x0000_2000),
+            56 => (K::LShift, 0x0000_0002),
+            60 => (K::RShift, 0x0000_0004),
+            55 => (K::LWin, 0x0000_0008),
+            54 => (K::RWin, 0x0000_0010),
+            58 => (K::LAlt, 0x0000_0020),
+            61 => (K::RAlt, 0x0000_0040),
+            63 => (K::Fn, 0x0080_0000),
+            _ => return None,
+        })
+    }
+
+    pub fn start() -> Result<(), String> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("bolo-event-tap".into())
+            .spawn(move || {
+                let result = CGEventTap::with_enabled(
+                    CGEventTapLocation::HID,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::Default,
+                    vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
+                    |_proxy, etype, event| {
+                        let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                        let fb = match etype {
+                            CGEventType::FlagsChanged => match flag_bit(code) {
+                                Some((k, bit)) => handle(k, event.get_flags().bits() & bit != 0),
+                                None => return CallbackResult::Keep,
+                            },
+                            CGEventType::KeyDown | CGEventType::KeyUp => {
+                                let k = match code {
+                                    49 => K::Space,
+                                    53 => K::Esc,
+                                    _ => K::Other,
+                                };
+                                handle(k, matches!(etype, CGEventType::KeyDown))
+                            }
+                            _ => return CallbackResult::Keep,
+                        };
+                        if fb.suppress { CallbackResult::Drop } else { CallbackResult::Keep }
+                    },
+                    || {
+                        let _ = ready_tx.send(true);
+                        CFRunLoop::run_current();
+                    },
+                );
+                if result.is_err() {
+                    let _ = ready_tx.send(false);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        match ready_rx.recv() {
+            Ok(true) => Ok(()),
+            _ => Err("Allow Bolo under System Settings → Privacy & Security → Accessibility, then restart Bolo".into()),
+        }
+    }
+}
+
+// ---------- Linux (X11): rdev, listen-only ----------
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{handle, K};
+    use rdev::{listen, EventType, Key};
+
+    fn map(k: Key) -> K {
+        match k {
+            Key::ControlLeft => K::LCtrl,
+            Key::ControlRight => K::RCtrl,
+            Key::Alt => K::LAlt,
+            Key::AltGr => K::RAlt,
+            Key::MetaLeft => K::LWin,
+            Key::MetaRight => K::RWin,
+            Key::ShiftLeft => K::LShift,
+            Key::ShiftRight => K::RShift,
+            Key::Function => K::Fn,
+            Key::Space => K::Space,
+            Key::Escape => K::Esc,
+            _ => K::Other,
+        }
+    }
+
+    pub fn start() -> Result<(), String> {
+        std::thread::Builder::new()
+            .name("bolo-rdev".into())
+            .spawn(|| {
+                let _ = listen(|ev| match ev.event_type {
+                    EventType::KeyPress(k) => {
+                        handle(map(k), true);
+                    }
+                    EventType::KeyRelease(k) => {
+                        handle(map(k), false);
+                    }
+                    _ => {}
+                });
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(m: &mut Machine, keys: &[(K, bool)], recording: bool) -> Vec<Action> {
+        let mut out = Vec::new();
+        for &(k, d) in keys {
+            m.feed(k, d, recording, &mut out);
+        }
+        out
+    }
+
+    fn machine() -> Machine {
+        let mut m = Machine::new();
+        m.preset = Some(Preset::CtrlWin);
+        m
+    }
+
+    #[test]
+    fn hold_and_release_dictates() {
+        let mut m = machine();
+        let out = run(&mut m, &[(K::LCtrl, true), (K::LWin, true), (K::LWin, false), (K::LCtrl, false)], false);
+        assert_eq!(out, vec![Action::Start, Action::Finish { command: false }]);
+    }
+
+    #[test]
+    fn win_release_after_chord_is_masked() {
+        let mut m = machine();
+        let mut out = Vec::new();
+        m.feed(K::LWin, true, false, &mut out);
+        m.feed(K::LCtrl, true, false, &mut out);
+        let fb = m.feed(K::LWin, false, false, &mut out);
+        assert!(fb.mask);
+    }
+
+    #[test]
+    fn space_goes_hands_free_and_is_swallowed() {
+        let mut m = machine();
+        let mut out = Vec::new();
+        m.feed(K::LCtrl, true, false, &mut out);
+        m.feed(K::LWin, true, false, &mut out);
+        assert!(m.feed(K::Space, true, true, &mut out).suppress);
+        assert!(m.feed(K::Space, false, true, &mut out).suppress);
+        m.feed(K::LWin, false, true, &mut out);
+        m.feed(K::LCtrl, false, true, &mut out);
+        assert_eq!(out, vec![Action::Start, Action::HandsFree]);
+        // Press the shortcut again to finish.
+        let out = run(&mut m, &[(K::LCtrl, true), (K::LWin, true)], true);
+        assert_eq!(out, vec![Action::Finish { command: false }]);
+    }
+
+    #[test]
+    fn alt_switches_to_command_mode() {
+        let mut m = machine();
+        let out = run(
+            &mut m,
+            &[(K::LCtrl, true), (K::LWin, true), (K::LAlt, true), (K::LAlt, false), (K::LWin, false)],
+            false,
+        );
+        assert_eq!(out, vec![Action::Start, Action::CommandMode, Action::Finish { command: true }]);
+    }
+
+    #[test]
+    fn other_key_cancels_as_normal_shortcut() {
+        let mut m = machine();
+        let out = run(&mut m, &[(K::LCtrl, true), (K::LWin, true), (K::Other, true), (K::Other, false), (K::LWin, false)], false);
+        assert_eq!(out, vec![Action::Start, Action::Cancel]);
+    }
+
+    #[test]
+    fn escape_cancels_only_while_recording() {
+        let mut m = machine();
+        let mut out = Vec::new();
+        assert!(!m.feed(K::Esc, true, false, &mut out).suppress);
+        m.feed(K::Esc, false, false, &mut out);
+        assert!(m.feed(K::Esc, true, true, &mut out).suppress);
+        assert_eq!(out, vec![Action::Cancel]);
+    }
+
+    #[test]
+    fn ctrl_alone_does_nothing() {
+        let mut m = machine();
+        let out = run(&mut m, &[(K::LCtrl, true), (K::Other, true), (K::Other, false), (K::LCtrl, false)], false);
+        assert!(out.is_empty());
+    }
+}

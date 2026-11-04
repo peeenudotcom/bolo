@@ -1,0 +1,9 @@
+# whisper.cpp CPU flags. "Native" builds tune for the build machine (bad for
+# installers built in CI) and on MSVC left out AVX2 entirely, making
+# transcription ~10x slower. Pin to AVX2/FMA/F16C: every x86 CPU since ~2013.
+[env]
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
