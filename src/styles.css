@@ -30,11 +30,12 @@
   box-sizing: border-box;
 }
 
-html,
-body {
-  /* No sideways scrolling or two-finger swipe bounce: it's an app, not a page. */
+/* No sideways drift or two-finger swipe bounce. Only the x axis, and only on
+   <html>: putting overflow on <body> too made body the scroller and broke
+   touchpad scrolling. */
+html {
   overflow-x: hidden;
-  overscroll-behavior: none;
+  overscroll-behavior-x: none;
 }
 
 body {
@@ -286,23 +287,44 @@ button.hotkey.listening {
 
 .cheats {
   list-style: none;
-  margin: 10px 0 14px;
+  margin: 0 0 6px;
   padding: 0;
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
 .cheats li {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 13px;
-  padding: 0 4px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 
-.cheats kbd {
-  white-space: nowrap;
+.cheat-title {
+  font-weight: 500;
+}
+
+.cheat-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.cheat-note {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+@media (max-width: 520px) {
+  .cheats {
+    grid-template-columns: 1fr;
+  }
 }
 
 .history .tag {

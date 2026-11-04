@@ -102,17 +102,18 @@ function renderShortcut() {
   $("#hotkey-help").textContent = preset?.help ?? "";
 
   const cheats = $("#cheats");
+  const card = (title: string, keys: string, note: string) =>
+    `<li><span class="cheat-title">${title}</span><span class="cheat-keys">${keys}</span><span class="cheat-note">${note}</span></li>`;
   if (preset) {
-    const rows: [string, string][] = [
-      ["Dictate", `Hold ${kbd(preset.keys)}`],
-      ["Hands-free", `${kbd([...preset.keys, "Space"])}, then ${kbd(preset.keys)} to stop`],
-      ["Command: edit selected text by voice", `Hold ${kbd([...preset.keys, preset.extra])}`],
-      ["Cancel", kbd(["Esc"])],
-    ];
-    cheats.innerHTML = rows.map(([what, how]) => `<li><span>${what}</span><span>${how}</span></li>`).join("");
+    cheats.innerHTML = [
+      card("Dictate", kbd(preset.keys), "Hold, speak, let go"),
+      card("Hands-free", kbd([...preset.keys, "Space"]), `Press ${preset.keys.join(" + ")} again to stop`),
+      card("Edit by voice", kbd([...preset.keys, preset.extra]), "Select text first, then hold"),
+      card("Cancel", kbd(["Esc"]), "While Bolo is listening"),
+    ].join("");
     $("#lede").innerHTML = `Hold ${kbd(preset.keys)} anywhere, speak, and let go.`;
   } else {
-    cheats.innerHTML = `<li><span>Cancel</span><span>${kbd(["Esc"])}</span></li>`;
+    cheats.innerHTML = card("Cancel", kbd(["Esc"]), "While Bolo is listening");
     $("#lede").innerHTML = `Hold <kbd></kbd> anywhere, speak, and let go. Tap it once for hands-free.`;
     $("#lede kbd")!.textContent = settings.hotkey;
   }
