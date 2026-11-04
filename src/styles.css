@@ -421,3 +421,18 @@ button.hotkey.listening {
 [hidden] {
   display: none !important;
 }
+
+.activity { margin: 12px auto; max-width: 664px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.style-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.style-grid label { display: grid; gap: 4px; }
+.row select { max-width: 100%; }
+.style-grid select { min-width: 0; width: 100%; }
+.history textarea { margin: 8px 0; }
+.history .actions { margin-top: 10px; }
+.history .error { color: var(--danger); overflow-wrap: anywhere; }
+.history .transcript { white-space: pre-wrap; overflow-wrap: anywhere; }
+#mic-level { width: 90px; }
+#update-result { display: block; margin-top: 8px; color: var(--muted); }
+#history-search { flex: 1; min-width: 120px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
+@media (max-width: 520px) { .row:not(label) { flex-wrap: wrap; } .row select { min-width: 0; width: 100%; } .style-grid { grid-template-columns: 1fr; } }

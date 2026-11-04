@@ -132,7 +132,7 @@ mod tests {
     /// named hindi.wav, mixed.wav and english.wav in BOLO_TEST_SPEECH_DIR.
     #[test]
     fn groq_speech_script_modes() {
-        let (Ok(key), Ok(dir)) = (std::env::var("BOLO_TEST_GROQ_KEY"), std::env::var("BOLO_TEST_SPEECH_DIR")) else {
+        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_TEST_SPEECH_DIR")) else {
             eprintln!("skipped: BOLO_TEST_GROQ_KEY / BOLO_TEST_SPEECH_DIR not set");
             return;
         };

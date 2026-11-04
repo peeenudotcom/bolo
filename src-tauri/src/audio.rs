@@ -18,7 +18,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn start(app: AppHandle) -> Result<Self> {
+    pub fn start(app: AppHandle, microphone: String) -> Result<Self> {
         let samples = Arc::new(Mutex::new(Vec::with_capacity(48_000 * 30)));
         let rate = Arc::new(Mutex::new(TARGET_RATE));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -26,7 +26,8 @@ impl Recorder {
         let (s2, r2) = (samples.clone(), rate.clone());
 
         let handle = thread::spawn(move || {
-            let stream = match open_stream(app, s2, r2) {
+            let limit_app = app.clone();
+            let stream = match open_stream(app, s2, r2, &microphone) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -38,7 +39,9 @@ impl Recorder {
                 return;
             }
             let _ = ready_tx.send(Ok(()));
-            let _ = stop_rx.recv();
+            if stop_rx.recv_timeout(Duration::from_secs(120)).is_err() {
+                crate::act(&limit_app, crate::hotkey::Action::Finish { command: false });
+            }
             drop(stream);
         });
 
@@ -65,6 +68,14 @@ impl Recorder {
         let rate = *self.rate.lock().unwrap();
         resample(&raw, rate, TARGET_RATE)
     }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) { if let Some(tx) = self.stop_tx.take() { let _ = tx.send(()); } }
+}
+
+pub fn microphones() -> Result<Vec<String>> {
+    Ok(cpal::default_host().input_devices()?.filter_map(|d| d.description().ok().map(|d| d.name().to_string())).collect())
 }
 
 struct Sink {
@@ -99,11 +110,12 @@ fn open_stream(
     app: AppHandle,
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<Mutex<u32>>,
+    microphone: &str,
 ) -> Result<cpal::Stream> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("No microphone found"))?;
+    let device = if microphone.is_empty() { host.default_input_device() }
+        else { host.input_devices()?.find(|d| d.description().is_ok_and(|d| d.name() == microphone)) }
+        .ok_or_else(|| anyhow!("Microphone unavailable. Choose another microphone in Settings."))?;
     let config = device.default_input_config()?;
     let channels = config.channels() as usize;
     *rate.lock().unwrap() = sample_rate_of(&config);

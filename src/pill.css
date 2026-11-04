@@ -56,10 +56,11 @@ body {
 }
 
 .pill.recording .bars,
-.pill.processing .dots,
+.pill.processing .msg,
 .pill.error .msg {
   opacity: 1;
 }
+.pill.processing { --w: 220px; }
 
 .bars {
   display: flex;

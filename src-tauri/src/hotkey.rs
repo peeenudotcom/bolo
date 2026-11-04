@@ -62,6 +62,14 @@ const CARET_UNKNOWN: u8 = 0;
 const CARET_SPACE: u8 = 1;
 const CARET_TEXT: u8 = 2;
 static CARET: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(CARET_UNKNOWN);
+static EDIT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROCESSING: AtomicBool = AtomicBool::new(false);
+pub fn edit_epoch() -> u64 { EDIT_EPOCH.load(Ordering::SeqCst) }
+pub fn invalidate_caret() {
+    CARET.store(CARET_UNKNOWN, Ordering::SeqCst);
+    EDIT_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+pub fn set_processing(on: bool) { PROCESSING.store(on, Ordering::SeqCst); }
 
 fn note_typed(k: K, shortcut_held: bool) {
     let v = match k {
@@ -72,6 +80,7 @@ fn note_typed(k: K, shortcut_held: bool) {
         _ => CARET_UNKNOWN,
     };
     CARET.store(v, Ordering::SeqCst);
+    EDIT_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Call after Bolo types `text` into the focused app.
@@ -281,18 +290,23 @@ pub fn set_recording(on: bool) {
 
 /// Waits (up to `max`) until the user lets go of every modifier key, so a
 /// synthetic Ctrl+V isn't turned into Ctrl+Win+V or similar.
-pub fn wait_modifiers_released(max: Duration) {
+pub fn wait_modifiers_released(max: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < max {
         prune_stale();
         if !MACHINE.lock().unwrap().modifiers_down() {
-            return;
+            return true;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    false
 }
 
 fn handle(k: K, down: bool) -> Feedback {
+    if k == K::Esc && down && PROCESSING.load(Ordering::SeqCst) {
+        if let Some(tx) = TX.get() { let _ = tx.lock().unwrap().send(Action::Cancel); }
+        return Feedback { suppress: true, mask: false };
+    }
     prune_stale();
     let mut out = Vec::new();
     let fb = {
@@ -436,6 +450,7 @@ mod win {
             .name("bolo-keyboard-hook".into())
             .spawn(move || unsafe {
                 let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0);
+                let _mouse = SetWindowsHookExW(14, Some(mouse_hook), GetModuleHandleW(std::ptr::null()), 0);
                 let _ = ready_tx.send(!h.is_null());
                 if h.is_null() {
                     return;
@@ -451,6 +466,14 @@ mod win {
             Ok(true) => Ok(()),
             _ => Err("Could not install the keyboard hook".into()),
         }
+    }
+
+    unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Any mouse button down can move focus or the caret; never guess spacing afterwards.
+        if code == HC_ACTION as i32 && matches!(wparam as u32, 0x0201 | 0x0204 | 0x0207 | 0x020B) {
+            super::invalidate_caret();
+        }
+        unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
     }
 }
 
@@ -667,6 +690,8 @@ mod tests {
     fn caret_tracking() {
         note_pasted("Hello there.");
         assert!(caret_after_text());
+        invalidate_caret(); // clicking another field invalidates spacing
+        assert!(!caret_after_text());
         note_typed(K::Space, false);
         assert!(!caret_after_text());
         note_typed(K::Char, false);

@@ -52,6 +52,45 @@ not the meaning or language; it does not translate Hindi into English.
 Recognition can still miss words, especially with noise or mixed speech. Check
 important dictations before sending them.
 
+## Recovery, privacy and preferences
+
+- Finished text is saved to History before Bolo attempts to paste. If you switch
+  windows, click elsewhere or type while it is processing, Bolo keeps the text
+  for you instead of pasting into the changed destination.
+- **Alt + Shift + V** pastes the last finished dictation; **Alt + Shift + C** copies
+  it. Retry in History re-transcribes saved audio without automatically pasting.
+  Voice edits are not retried against a different selection.
+- History defaults to the current session. Optional 24-hour or 7-day local
+  retention keeps up to 20 entries. Saving audio across restarts is separately
+  opt-in. Audio in session memory supports retry until you quit. These files are
+  local, not encrypted by Bolo; clearing History removes its saved recordings.
+- **Escape** cancels recording or processing. Requests time out after 60 seconds;
+  recordings stop after 2 minutes. Offline decoding may finish in the background
+  after cancellation, but its result is not pasted.
+- Choose a microphone and test its level for 5 seconds without saving or uploading
+  test audio. Choose formatting styles per app category. AI cleanup applies
+  capitalization/style preferences; corrections and snippet expansion also work
+  without AI.
+- Add whole-word/phrase corrections in Words or teach them from History. Bolo
+  never monitors all your edits or learns spelling without an explicit action.
+- Optional Windows nearby-text support reads at most 200 characters before and
+  100 after the caret in supported focused text fields. It sends that text to
+  your selected cleanup provider for spelling. It does not capture screenshots.
+  Standard password fields and address/search fields are excluded; custom fields
+  may not identify themselves correctly. Keep it off for sensitive work.
+- Groq keys are stored in the OS credential store (Windows Credential Manager,
+  macOS Keychain or Linux Secret Service). Existing plaintext keys are migrated
+  only after secure storage succeeds. The settings UI receives a placeholder,
+  not the stored key. A locked/unavailable credential store may need unlocking.
+- Windows clipboard preservation supports text, HTML, bitmap images and file
+  lists, and respects anything you copy during the paste. Unsupported formats or
+  clipboards over 64 MB are left untouched; recover your dictation from History.
+  On other platforms preservation supports text/images; unsupported clipboard
+  formats may require turning preservation off. Native context and clipboard
+  improvements have been verified on Windows only.
+- Update checks use published GitHub releases. Startup checks are opt-in; updates
+  are never downloaded or installed automatically.
+
 ## Develop
 
 Needs Node 20+, Rust, CMake and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) (on Windows: Visual Studio C++ Build Tools).

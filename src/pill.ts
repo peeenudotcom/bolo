@@ -12,6 +12,7 @@ let errorTimer: number | undefined;
 function setState(s: Status) {
   window.clearTimeout(errorTimer);
   pill.className = `pill ${s.state}`;
+  if (s.state === "processing") { msg.textContent = s.message ?? "Processing… Esc to cancel"; msg.title = msg.textContent; }
   if (s.state === "recording" && s.message?.includes("hands-free")) pill.classList.add("hands-free");
   if (s.state === "recording" && s.message?.includes("command")) pill.classList.add("command");
   if (s.state === "error") {

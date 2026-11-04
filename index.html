@@ -20,6 +20,7 @@
       <button role="tab" aria-selected="false" data-tab="words">Words</button>
       <button role="tab" aria-selected="false" data-tab="history">History</button>
     </nav>
+    <div id="activity" class="activity" hidden role="status"><span id="activity-text"></span><button id="cancel-processing" class="btn">Cancel</button></div>
 
     <main>
       <section data-panel="general">
@@ -48,6 +49,12 @@
 
         <div class="group">
           <h2>Speech to text</h2>
+          <div class="row stack">
+            <label for="microphone">Microphone</label>
+            <select id="microphone" data-key="microphone"><option value="">System default</option></select>
+            <div class="actions"><button class="btn" id="refresh-microphones">Refresh devices</button><button class="btn" id="test-microphone">Test microphone</button><meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone level"></meter></div>
+            <small id="mic-help">Test for 5 seconds. Test audio is never saved or sent.</small>
+          </div>
           <div class="row">
             <div class="label">
               <span>Engine</span>
@@ -83,7 +90,7 @@
           <div class="row stack">
             <div class="label">
               <span>Groq API key <em>optional, free</em></span>
-              <small>Makes dictation near-instant and more accurate. Get one at <a href="https://console.groq.com/keys" data-external>console.groq.com/keys</a>.</small>
+              <small>Stored in your OS credential store. Re-enter to replace, or clear to remove. Get a free key at <a href="https://console.groq.com/keys" data-external>console.groq.com/keys</a>.</small>
             </div>
             <input type="password" data-key="groq_api_key" placeholder="gsk_…" autocomplete="off" spellcheck="false" />
           </div>
@@ -97,6 +104,15 @@
 
         <div class="group">
           <h2>Smart formatting</h2>
+          <div class="row stack"><span>Writing styles</span><small>Formatting preferences, without changing your meaning.</small>
+            <div class="style-grid">
+              <label>Chat<select data-key="chat_style"></select></label>
+              <label>Email<select data-key="email_style"></select></label>
+              <label>Code<select data-key="code_style"></select></label>
+              <label>Other apps<select data-key="other_style"></select></label>
+            </div>
+          </div>
+          <label class="row" id="context-row"><div class="label"><span>Use nearby text for spelling</span><small>Windows only. Reads up to 300 characters in the focused text field and sends them to your chosen cleanup service. Off by default; standard password fields are excluded. Custom fields may not identify themselves correctly.</small></div><input type="checkbox" class="switch" data-key="context_enabled" /></label>
           <label class="row">
             <div class="label">
               <span>Match the app I'm typing in</span>
@@ -154,6 +170,14 @@
             <input type="checkbox" class="switch" data-key="restore_clipboard" />
           </label>
         </div>
+        <div class="group">
+          <h2>History & recovery</h2>
+          <div class="row"><div class="label"><span>Keep dictations</span><small>Up to 20 entries. Saved history stays on this computer.</small></div><select data-key="history_retention"><option value="session">Until Bolo quits</option><option value="day">24 hours</option><option value="week">7 days</option></select></div>
+          <label class="row"><div class="label"><span>Save recordings for retry</span><small>With saved history, keeps audio for the same period. Off: audio can only be retried until Bolo quits.</small></div><input type="checkbox" class="switch" data-key="save_audio" /></label>
+          <p class="hint">Paste last dictation: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd>. Copy last: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>. Dictations stop automatically after 2 minutes.</p>
+          <label class="row"><div class="label"><span>Check for updates on startup</span><small>Checks published GitHub releases. Nothing is installed automatically.</small></div><input type="checkbox" class="switch" data-key="check_updates" /></label>
+          <button id="check-update" class="btn">Check for updates</button><span id="update-result" role="status"></span>
+        </div>
       </section>
 
       <section data-panel="words" hidden>
@@ -162,6 +186,7 @@
           <p class="hint">Names, brands and jargon Bolo should spell right. One per line.</p>
           <textarea data-key="dictionary" rows="7" spellcheck="false" placeholder="Peeenu&#10;Tauri&#10;Ludhiana"></textarea>
         </div>
+        <div class="group"><h2>Always write it this way</h2><p class="hint">Teach recurring mistakes. One correction per line, such as <code>bolo app => Bolo</code>. Matches whole words and phrases.</p><textarea data-key="corrections" rows="5" spellcheck="false" placeholder="misspelling => preferred spelling"></textarea></div>
         <div class="group">
           <h2>Snippets</h2>
           <p class="hint">Say the phrase on the left and Bolo types the right. One per line, use <code>\n</code> for a new line.</p>
@@ -172,7 +197,8 @@
       <section data-panel="history" hidden>
         <div class="group">
           <h2>Recent dictations</h2>
-          <p class="hint">Kept until you quit Bolo. Click one to copy it.</p>
+          <p class="hint">Text is saved here before pasting. Retry updates the entry without typing into another app. Review recovered text, then copy it or use the paste-last shortcut.</p>
+          <div class="actions"><input id="history-search" type="search" placeholder="Search dictations" aria-label="Search dictations" /><button id="clear-history" class="btn">Clear history</button></div>
           <ul class="history" id="history"></ul>
         </div>
       </section>

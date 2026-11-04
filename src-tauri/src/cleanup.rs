@@ -191,7 +191,7 @@ mod tests {
     /// Live check against Groq. Set BOLO_TEST_GROQ_KEY to run.
     #[test]
     fn groq_cleanup_command_and_fallback() {
-        let Ok(key) = std::env::var("BOLO_TEST_GROQ_KEY") else {
+        let Ok(key) = crate::settings::live_test_key() else {
             eprintln!("skipped: BOLO_TEST_GROQ_KEY not set");
             return;
         };
@@ -239,6 +239,9 @@ mod tests {
         assert_eq!(expand_snippets("Send it to My Email please", &pairs), "Send it to me@example.com please");
         assert_eq!(expand_snippets("My email.", &pairs), "me@example.com");
         assert_eq!(expand_snippets("नमस्ते my email", &pairs), "नमस्ते me@example.com");
+        let pairs = vec![("sign".into(), "signature".into())];
+        assert_eq!(expand_snippets("design sign signal", &pairs), "design signature signal");
+        assert_eq!(super::correct("bolo app works", "bolo app => Bolo"), "Bolo works");
     }
 }
 
@@ -255,6 +258,10 @@ pub fn expand_snippets(text: &str, pairs: &[(String, String)]) -> String {
         let mut result = String::with_capacity(out.len());
         let mut last = 0;
         for (idx, _) in lower.match_indices(&t) {
+            let before = out[..idx].chars().next_back();
+            let after = out[idx + t.len()..].chars().next();
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            if before.is_some_and(word) || after.is_some_and(word) { continue; }
             result.push_str(&out[last..idx]);
             result.push_str(replacement);
             last = idx + t.len();
@@ -269,4 +276,12 @@ pub fn expand_snippets(text: &str, pairs: &[(String, String)]) -> String {
         }
     }
     out
+}
+
+/// Corrections use the same whole-phrase boundaries as snippets.
+pub fn correct(text: &str, rules: &str) -> String {
+    let pairs: Vec<_> = rules.lines().filter_map(|l| l.split_once("=>"))
+        .map(|(a,b)| (a.trim().to_string(), b.trim().to_string()))
+        .filter(|(a,b)| !a.is_empty() && !b.is_empty()).collect();
+    expand_snippets(text, &pairs)
 }

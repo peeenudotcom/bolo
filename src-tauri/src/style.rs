@@ -4,7 +4,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppKind {
     Chat,
     Email,
@@ -18,6 +18,8 @@ pub struct Target {
     /// Window title, used to tell whether two dictations went to the same place.
     pub title: String,
     pub kind: AppKind,
+    pub window_id: usize,
+    pub edit_epoch: u64,
 }
 
 impl Default for AppKind {
@@ -74,19 +76,48 @@ pub fn detect() -> Target {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let kind = classify(&w.app_name, &exe, &w.title);
-            Target { app: if w.app_name.is_empty() { exe } else { w.app_name }, title: w.title, kind }
+            Target { app: if w.app_name.is_empty() { exe } else { w.app_name }, title: w.title, kind,
+                window_id: foreground_id(), edit_epoch: crate::hotkey::edit_epoch() }
         }
         Err(_) => Target::default(),
     }
 }
 
-pub fn hint(kind: AppKind) -> Option<&'static str> {
-    match kind {
-        AppKind::Chat => Some("The text is a chat message: keep it casual and natural, and leave off the full stop at the very end."),
-        AppKind::Email => Some("The text is going into an email: use complete, well-punctuated sentences, and paragraphs if it is long."),
-        AppKind::Code => Some("The user is in a code editor or terminal: keep wording literal, keep technical terms, file names and casing exactly, and add no full stop at the end."),
-        AppKind::Other => None,
+fn foreground_id() -> usize {
+    #[cfg(windows)]
+    { unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as usize } }
+    #[cfg(not(windows))]
+    { 0 }
+}
+
+pub fn still_target(target: &Target) -> bool {
+    let now = detect();
+    matches_target(target, &now)
+}
+
+fn matches_target(target: &Target, now: &Target) -> bool {
+    !target.app.is_empty() && now.app == target.app && now.title == target.title
+        && now.window_id == target.window_id && now.edit_epoch == target.edit_epoch
+}
+
+pub fn preference<'a>(s: &'a crate::settings::Settings, kind: AppKind) -> &'a str {
+    if !s.app_style { return "literal"; }
+    match kind { AppKind::Chat => &s.chat_style, AppKind::Email => &s.email_style,
+        AppKind::Code => &s.code_style, AppKind::Other => &s.other_style }
+}
+
+pub fn preference_hint(preference: &str) -> &'static str {
+    match preference {
+        "casual" => "Keep the speaker's words. Use natural capitalization and light punctuation, without a final full stop.",
+        "lowercase" => "Keep the speaker's words. Use lowercase and light punctuation; preserve proper names and acronyms.",
+        "literal" => "Keep wording, casing and technical syntax literal. Do not rewrite the speaker's phrasing.",
+        _ => "Keep the speaker's words. Use sentence capitalization and complete punctuation.",
     }
+}
+
+pub fn finish_preferred(text: &str, preference: &str) -> String {
+    if matches!(preference, "casual" | "lowercase" | "literal") { finish(text, AppKind::Chat) }
+    else { text.trim().to_string() }
 }
 
 /// Joins a new dictation onto text already before the caret: adds the
@@ -194,6 +225,19 @@ mod tests {
         assert_eq!(join_after_text("I'm here."), " I'm here.");
         assert_eq!(join_after_text(", and then"), ", and then");
         assert_eq!(join_after_text("\nNext line"), "\nNext line");
+    }
+
+    #[test]
+    fn destination_guard_rejects_changes() {
+        let target = Target { app: "Notepad".into(), title: "Note".into(), window_id: 123, edit_epoch: 8, ..Default::default() };
+        assert!(matches_target(&target, &target));
+        for changed in [
+            Target { app: "Mail".into(), ..target.clone() },
+            Target { title: "Other note".into(), ..target.clone() },
+            Target { window_id: 124, ..target.clone() },
+            Target { edit_epoch: 9, ..target.clone() },
+        ] { assert!(!matches_target(&target, &changed)); }
+        assert!(!matches_target(&Target::default(), &Target::default()));
     }
 
     #[test]

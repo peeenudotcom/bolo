@@ -9,12 +9,13 @@ type Settings = Record<string, string | boolean> & {
 };
 
 type Model = { name: string; label: string; size_mb: number; note: string; downloaded: boolean };
-type HistoryItem = { text: string; raw: string; at: number; engine: string; app: string; command: boolean };
+type HistoryItem = { id: number; status: string; error: string; has_audio: boolean; text: string; raw: string; at: number; engine: string; app: string; command: boolean };
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 const saveState = $("#save-state");
 let settings: Settings;
 let saveTimer: number | undefined;
+let saveQueue: Promise<void> = Promise.resolve();
 const downloading = new Map<string, number>();
 
 // ---------- tabs ----------
@@ -42,7 +43,10 @@ function showStatus(text: string, error = false) {
 
 async function save() {
   try {
-    await invoke("save_settings", { new: settings });
+    const snapshot = structuredClone(settings);
+    const next = saveQueue.catch(() => {}).then(() => invoke<void>("save_settings", { new: snapshot }));
+    saveQueue = next;
+    await next;
     showStatus("Saved");
     window.setTimeout(() => saveState.textContent === "Saved" && showStatus(""), 1500);
   } catch (err) {
@@ -53,7 +57,7 @@ async function save() {
 
 function queueSave() {
   window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(save, 400);
+  saveTimer = window.setTimeout(() => { void save().catch(() => {}); }, 400);
 }
 
 // ---------- shortcut presets ----------
@@ -109,7 +113,7 @@ function renderShortcut() {
       card("Dictate", kbd(preset.keys), "Hold, speak, let go"),
       card("Hands-free", kbd([...preset.keys, "Space"]), `Press ${preset.keys.join(" + ")} again to stop`),
       card("Edit by voice", kbd([...preset.keys, preset.extra]), "Select text first, then hold"),
-      card("Cancel", kbd(["Esc"]), "While Bolo is listening"),
+      card("Cancel", kbd(["Esc"]), "While recording or processing"),
     ].join("");
     $("#lede").innerHTML = `Hold ${kbd(preset.keys)} anywhere, speak, and let go.`;
   } else {
@@ -279,56 +283,115 @@ listen<{ name: string; downloaded: number; total: number }>("bolo://download", (
 });
 
 // ---------- history ----------
+
+function actionButton(label: string, fn: () => Promise<unknown>) {
+  const button = document.createElement("button"); button.className = "btn"; button.textContent = label;
+  button.addEventListener("click", async () => { button.disabled = true; try { await fn(); } catch (e) { showStatus(String(e), true); } finally { button.disabled = false; } });
+  return button;
+}
 async function renderHistory() {
   const items = await invoke<HistoryItem[]>("get_history");
+  const query = $<HTMLInputElement>("#history-search").value.toLowerCase();
   const list = $("#history");
-  if (!items.length) {
+  list.replaceChildren(...items.filter(h => (h.text + h.raw + h.app).toLowerCase().includes(query)).map(h => {
     const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "Nothing yet. Hold your shortcut and say something.";
-    list.replaceChildren(li);
-    return;
-  }
-  list.replaceChildren(
-    ...items.map((h) => {
-      const li = document.createElement("li");
-      if (h.command) {
-        const tag = document.createElement("span");
-        tag.className = "tag";
-        tag.textContent = "COMMAND";
-        li.append(tag);
-      }
-      li.append(h.text);
-      const when = document.createElement("span");
-      when.className = "when";
-      const time = new Date(h.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      when.textContent = [time, h.app, h.engine].filter(Boolean).join(" · ");
-      li.append(when);
-      li.title = "Click to copy";
-      li.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(h.text);
-        when.textContent = "Copied";
-      });
-      return li;
-    }),
-  );
+    const text = document.createElement("div"); text.className = "transcript"; text.textContent = h.text || h.raw || "Recording saved — retry to transcribe.";
+    const when = document.createElement("span"); when.className = "when";
+    when.textContent = [new Date(h.at).toLocaleString(), h.app, h.engine, h.status].filter(Boolean).join(" · ");
+    li.append(text, when);
+    if (h.error) { const error = document.createElement("p"); error.className = "error"; error.textContent = h.error; li.append(error); }
+    const actions = document.createElement("div"); actions.className = "actions";
+    if (h.text || h.raw) actions.append(actionButton("Copy", async () => { await navigator.clipboard.writeText(h.text || h.raw); showStatus("Copied"); }));
+    if (h.has_audio && !h.command) actions.append(actionButton("Retry", async () => { await invoke("retry_dictation", { id: h.id }); await renderHistory(); }));
+    actions.append(actionButton("Delete", async () => { await invoke("delete_history", { id: h.id }); await renderHistory(); }));
+    const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Raw transcript & spelling correction"; details.append(summary);
+    const raw = document.createElement("p"); raw.textContent = h.raw; raw.className = "transcript"; details.append(raw);
+    const heard = document.createElement("input"); heard.type = "text"; heard.placeholder = "Heard as"; heard.setAttribute("aria-label", "Incorrect word or phrase"); heard.maxLength = 120;
+    const wanted = document.createElement("input"); wanted.type = "text"; wanted.placeholder = "Always write as"; wanted.setAttribute("aria-label", "Preferred spelling"); wanted.maxLength = 120;
+    const teach = document.createElement("div"); teach.className = "actions"; teach.append(heard, wanted, actionButton("Remember correction", async () => {
+      window.clearTimeout(saveTimer); await save();
+      await invoke("teach_correction", { heard: heard.value, wanted: wanted.value });
+      const latest = await invoke<Settings>("get_settings"); settings.corrections = latest.corrections;
+      $<HTMLTextAreaElement>('[data-key="corrections"]').value = String(latest.corrections);
+      showStatus("Correction remembered"); heard.value = ""; wanted.value = "";
+    })); details.append(teach); li.append(actions, details); return li;
+  }));
+  if (!list.childElementCount) { const empty=document.createElement("li"); empty.className="empty"; empty.textContent = items.length ? "No matching dictations." : "Nothing yet. Hold your shortcut and speak."; list.append(empty); }
 }
+$("#history-search").addEventListener("input", () => void renderHistory());
+$("#clear-history").addEventListener("click", async () => {
+  const button = $("#clear-history");
+  if (button.textContent !== "Confirm clear") { button.textContent = "Confirm clear"; window.setTimeout(() => button.textContent = "Clear history", 4000); return; }
+  try { await invoke("delete_history", { id: null }); await renderHistory(); } catch(e) { showStatus(String(e), true); }
+  button.textContent = "Clear history";
+});
 
 listen("bolo://history", () => {
   if (!$<HTMLElement>('[data-panel="history"]').hidden) renderHistory();
 });
 
 listen<{ state: string; message?: string }>("bolo://state", (e) => {
-  if (e.payload.state === "error") showStatus(e.payload.message ?? "Error", true);
+
+  const busy = e.payload.state === "processing" || e.payload.state === "recording";
+  $("#activity").hidden = !busy;
+  $("#activity-text").textContent = e.payload.message || (e.payload.state === "recording" ? "Listening…" : "Processing…");
+  if (e.payload.state === "error") { showStatus(e.payload.message ?? "Error", true); }
+
 });
 
+
+$("#cancel-processing").addEventListener("click", () => void invoke("cancel_processing"));
+let testingMic = false;
+let micTimer: number | undefined;
+async function loadMicrophones() {
+  try {
+    const names = await invoke<string[]>("list_microphones"); const select=$<HTMLSelectElement>("#microphone");
+    select.replaceChildren(new Option("System default", ""), ...names.map(n => new Option(n,n)));
+    const selected=String(settings.microphone ?? "");
+    if (selected && !names.includes(selected)) select.add(new Option(selected + " (unavailable)", selected));
+    select.value=selected;
+  } catch(e) { showStatus(String(e),true); }
+}
+$("#refresh-microphones").addEventListener("click", () => void loadMicrophones());
+async function stopMicTest() {
+  window.clearTimeout(micTimer);
+  await invoke("microphone_test", { start:false }); testingMic=false;
+  $("#test-microphone").textContent="Test microphone"; $<HTMLMeterElement>("#mic-level").value=0;
+}
+$("#test-microphone").addEventListener("click", async () => {
+  try {
+    if(testingMic) { await stopMicTest(); return; }
+    window.clearTimeout(saveTimer); await save(); await invoke("microphone_test", { start:true });
+    testingMic=true; $("#test-microphone").textContent="Stop test";
+    micTimer = window.setTimeout(() => { if(testingMic) void stopMicTest().catch(e=>showStatus(String(e),true)); },5000);
+  } catch(e) { showStatus(String(e),true); }
+});
+listen<number>("bolo://level", e => { if(testingMic) $<HTMLMeterElement>("#mic-level").value=Math.min(1,Math.sqrt(e.payload)*3.2); });
+async function checkForUpdates() {
+  const button=$<HTMLButtonElement>("#check-update"); button.disabled=true;
+  $("#update-result").textContent="Checking GitHub releases…";
+  try {
+    const result=await invoke<{current:string;latest:string;available:boolean;url:string}>("check_update");
+    $("#update-result").textContent=result.available ? 'Update '+result.latest+' is available. ' : 'Installed: '+result.current+'. Latest published: '+result.latest+'. No newer release.';
+    if(result.available) { const link=document.createElement("button"); link.className="btn"; link.textContent="Open release"; link.addEventListener("click",()=>void openUrl(result.url)); $("#update-result").append(link); }
+  } catch { $("#update-result").textContent="Could not check updates. Try again when you are online."; }
+  finally { button.disabled=false; }
+}
+$("#check-update").addEventListener("click", () => void checkForUpdates());
 // ---------- boot ----------
 (async () => {
   settings = await invoke<Settings>("get_settings");
   os = await invoke<string>("platform");
+
+  for (const select of document.querySelectorAll<HTMLSelectElement>('.style-grid select')) {
+    for (const [value,label] of [["formal","Formal — Hello, team."],["casual","Casual — Hello, team"],["lowercase","Lowercase — hello, team"],["literal","Literal — preserve wording"]]) select.add(new Option(label,value));
+  }
+  await loadMicrophones();
+  $("#context-row").hidden = os !== "windows";
   bindFields();
   applyVisibility();
   renderShortcut();
+  if(settings.check_updates) void checkForUpdates();
   await renderModels();
   const models = await invoke<Model[]>("list_models");
   if (!models.some((m) => m.downloaded) && !String(settings.groq_api_key).trim()) {
