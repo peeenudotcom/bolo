@@ -70,14 +70,21 @@ fn act(app: &AppHandle, action: Action) {
         status(app, "error", Some("Stop the microphone test before dictating".into()));
         return;
     }
+    // Read settings up front, in their own statement. Locking them inside the
+    // match below kept the guard alive for the whole match, and the second
+    // lock deadlocked: Ctrl+Win froze Bolo with no pill.
+    let (microphone, app_style) = {
+        let s = state.settings.lock().unwrap();
+        (s.microphone.clone(), s.app_style)
+    };
     let mut phase = state.phase.lock().unwrap();
     match (action, &mut *phase) {
-        (Action::Start, Phase::Idle) => match audio::Recorder::start(app.clone(), state.settings.lock().unwrap().microphone.clone()) {
+        (Action::Start, Phase::Idle) => match audio::Recorder::start(app.clone(), microphone) {
             Ok(rec) => {
                 // Always note the window (for spacing between dictations);
                 // only adapt the writing style when that setting is on.
                 let mut target = style::detect();
-                if !state.settings.lock().unwrap().app_style {
+                if !app_style {
                     target.kind = style::AppKind::Other;
                 }
                 *phase = Phase::Recording { rec, started: Instant::now(), hands_free: false, command: false, target };
