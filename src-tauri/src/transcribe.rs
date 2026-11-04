@@ -128,6 +128,44 @@ fn wav_bytes(audio: &[f32]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// Optional full Groq speech + cleanup check. Supply 16 kHz mono i16 WAVs
+    /// named hindi.wav, mixed.wav and english.wav in BOLO_TEST_SPEECH_DIR.
+    #[test]
+    fn groq_speech_script_modes() {
+        let (Ok(key), Ok(dir)) = (std::env::var("BOLO_TEST_GROQ_KEY"), std::env::var("BOLO_TEST_SPEECH_DIR")) else {
+            eprintln!("skipped: BOLO_TEST_GROQ_KEY / BOLO_TEST_SPEECH_DIR not set");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+            let target = crate::cleanup::Target {
+                base_url: "https://api.groq.com/openai/v1", key: Some(&key),
+                model: crate::settings::DEFAULT_GROQ_MODEL,
+            };
+            for name in ["hindi", "mixed", "english"] {
+                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
+                assert_eq!(reader.spec().sample_rate, TARGET_RATE);
+                assert_eq!(reader.spec().channels, 1);
+                let audio: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
+                for roman in [true, false] {
+                    // The app leaves script conversion to cleanup when available.
+                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &audio, "auto", &[], false).await.unwrap();
+                    let out = crate::cleanup::run(&http, target, &raw, &[], roman, None).await.unwrap();
+                    eprintln!("{name} roman={roman}: raw={raw} -> {out}");
+                    assert!(!out.is_empty());
+                    let devanagari = out.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c));
+                    assert_eq!(devanagari, !roman && name != "english", "{out}");
+                    if name == "mixed" {
+                        assert!(out.to_lowercase().contains("report"), "{out}");
+                    } else if name == "english" {
+                        assert!(out.to_lowercase().contains("document") && out.to_lowercase().contains("friday"), "{out}");
+                    }
+                }
+            }
+        });
+    }
+
     /// Set BOLO_TEST_MODEL (a ggml .bin) and BOLO_TEST_WAV (16 kHz mono) to run.
     #[test]
     fn transcribes_wav_locally() {

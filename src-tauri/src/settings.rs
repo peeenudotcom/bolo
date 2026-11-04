@@ -37,7 +37,7 @@ pub struct Settings {
     pub version: u32,
 }
 
-const SETTINGS_VERSION: u32 = 5;
+const SETTINGS_VERSION: u32 = 6;
 pub const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 
 #[cfg(target_os = "macos")]
@@ -55,7 +55,7 @@ impl Default for Settings {
             local_model: "base".into(),
             groq_api_key: String::new(),
             groq_whisper_model: "whisper-large-v3-turbo".into(),
-            language: "en".into(),
+            language: "auto".into(),
             cleanup: "auto".into(),
             groq_cleanup_model: DEFAULT_GROQ_MODEL.into(),
             ollama_url: "http://localhost:11434".into(),
@@ -100,10 +100,14 @@ fn path(app: &AppHandle) -> PathBuf {
 }
 
 pub fn load(app: &AppHandle) -> Settings {
-    let mut s: Settings = std::fs::read_to_string(path(app))
+    let s: Settings = std::fs::read_to_string(path(app))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    migrate(s)
+}
+
+fn migrate(mut s: Settings) -> Settings {
     // The first preview used a three-key default; move people to the new one.
     if s.hotkey == "Ctrl+Shift+Space" {
         s.hotkey = DEFAULT_HOTKEY.into();
@@ -126,6 +130,11 @@ pub fn load(app: &AppHandle) -> Settings {
     if s.version < 5 {
         s.hinglish_roman = true;
     }
+    // The old English default also forced Hindi speech through English decoding.
+    // Detect the spoken language so the script toggle can work in both directions.
+    if s.version < 6 && s.language == "en" {
+        s.language = "auto".into();
+    }
     s.version = SETTINGS_VERSION;
     s
 }
@@ -137,4 +146,26 @@ pub fn save(app: &AppHandle, s: &Settings) -> anyhow::Result<()> {
     }
     std::fs::write(p, serde_json::to_string_pretty(s)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_language_without_reenabling_hinglish() {
+        let s = migrate(Settings { version: 5, language: "en".into(), hinglish_roman: false, ..Settings::default() });
+        assert_eq!(s.language, "auto");
+        assert!(!s.hinglish_roman);
+        assert_eq!(s.version, SETTINGS_VERSION);
+        assert_eq!(Settings::default().language, "auto");
+    }
+
+    #[test]
+    fn preserves_other_languages_and_new_explicit_choices() {
+        for (version, language) in [(5, "hi"), (5, "pa"), (6, "en")] {
+            let s = migrate(Settings { version, language: language.into(), ..Settings::default() });
+            assert_eq!(s.language, language);
+        }
+    }
 }

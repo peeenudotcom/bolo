@@ -262,7 +262,10 @@ async fn transcribe_any(
         _ => !s.groq_api_key.trim().is_empty(),
     };
     if use_groq {
-        match transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, &s.language, terms, s.hinglish_roman).await {
+        // Let Whisper recognize Hindi in its native script when a cleanup model
+        // can convert it afterwards. Roman prompting can distort Hindi words.
+        let roman_hint = s.hinglish_roman && llm_target(s, false).is_none();
+        match transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, &s.language, terms, roman_hint).await {
             Ok(t) => return Ok((t, "groq")),
             Err(e) if s.engine == "auto" && models::path(app, &s.local_model).exists() => {
                 eprintln!("Groq failed, falling back to local: {e}");
@@ -284,7 +287,7 @@ async fn transcribe_local(
         anyhow::bail!("Download a speech model in Bolo's settings first");
     }
     let lang = s.language.clone();
-    let hinglish_roman = s.hinglish_roman;
+    let hinglish_roman = s.hinglish_roman && llm_target(s, false).is_none();
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();

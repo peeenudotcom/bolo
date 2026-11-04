@@ -39,6 +39,19 @@ On first launch, download an offline model (Base is a good start) or paste a fre
 
 **Linux:** typing into other apps works on X11. Wayland support depends on your desktop.
 
+## English, Hindi and Hinglish
+
+Leave **Language** on **Automatic** when switching between English, Hindi and mixed speech.
+**Write Hindi as Hinglish** is on by default: Hindi is written in Roman letters
+(“kal milte hain”), while English stays English. Switch it off for Hindi in
+Devanagari (“कल मिलते हैं”), with English words kept in English.
+Keep AI cleanup on with Groq or Ollama for script conversion. Without cleanup,
+Whisper's raw output can use a different script. This changes the writing script,
+not the meaning or language; it does not translate Hindi into English.
+
+Recognition can still miss words, especially with noise or mixed speech. Check
+important dictations before sending them.
+
 ## Develop
 
 Needs Node 20+, Rust, CMake and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) (on Windows: Visual Studio C++ Build Tools).

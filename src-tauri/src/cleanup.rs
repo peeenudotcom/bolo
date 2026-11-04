@@ -163,6 +163,10 @@ pub async fn run(
         system.push_str(
             "\n- Write any Hindi in Roman script (Hinglish, e.g. \"kal milte hain\"), never in Devanagari. Keep English words in English.",
         );
+    } else {
+        system.push_str(
+            "\n- Write Hindi words in Devanagari, including Hindi transcribed in Roman letters. Preserve English words in Latin letters, even common borrowed words such as meeting, report, office, client and please. Never change meeting to मीटिंग or report to रिपोर्ट. Example: \"Kal milte hain, meeting paanch baje hai\" -> \"कल मिलते हैं, meeting पाँच बजे है\". Do not translate either language, and preserve other languages in their own script.",
+        );
     }
 
     let out = chat(http, target, &system, &format!("<transcript>\n{raw}\n</transcript>"))
@@ -212,6 +216,11 @@ mod tests {
             let out = super::run(&http, t, "please send the report by friday", &[], true, None).await.unwrap();
             eprintln!("english with hinglish on: {out}");
             assert!(out.to_lowercase().contains("report") && out.to_lowercase().contains("friday"), "got: {out}");
+            let out = super::run(&http, t, "Kal milte hain, meeting paanch baje hai", &[], false, None).await.unwrap();
+            eprintln!("hinglish off: {out}");
+            assert!(devanagari(&out) && out.to_lowercase().contains("meeting"), "got: {out}");
+            let out = super::run(&http, t, "please send the report by friday", &[], false, None).await.unwrap();
+            assert!(!devanagari(&out) && out.to_lowercase().contains("report"), "got: {out}");
             let out = super::command(&http, t, "make this more polite", Some("send me the report now"), None).await.unwrap();
             eprintln!("command: {out}");
             assert!(out.to_lowercase().contains("report"), "got: {out}");
