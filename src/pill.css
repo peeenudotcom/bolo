@@ -38,8 +38,9 @@ body {
   transition: opacity 150ms ease;
 }
 
+/* Out of the way until you dictate; the tray icon shows Bolo is running. */
 .pill.idle {
-  opacity: 0.55;
+  opacity: 0;
 }
 
 .pill.recording,

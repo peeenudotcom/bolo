@@ -120,8 +120,8 @@ function renderShortcut() {
 
 function applyVisibility() {
   document.querySelectorAll<HTMLElement>("[data-show]").forEach((el) => {
-    const [key, val] = el.dataset.show!.split("=");
-    el.hidden = settings[key] !== val;
+    const [key, vals] = el.dataset.show!.split("=");
+    el.hidden = !vals.split(",").includes(String(settings[key]));
   });
 }
 

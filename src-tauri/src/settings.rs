@@ -15,7 +15,7 @@ pub struct Settings {
     pub groq_whisper_model: String,
     /// Whisper language code, or "auto".
     pub language: String,
-    /// "off", "groq" or "ollama".
+    /// "auto" (Groq when a key is set, otherwise off), "off", "groq" or "ollama".
     pub cleanup: String,
     pub groq_cleanup_model: String,
     pub ollama_url: String,
@@ -36,7 +36,7 @@ pub struct Settings {
     pub version: u32,
 }
 
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 pub const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 
 #[cfg(target_os = "macos")]
@@ -55,7 +55,7 @@ impl Default for Settings {
             groq_api_key: String::new(),
             groq_whisper_model: "whisper-large-v3-turbo".into(),
             language: "en".into(),
-            cleanup: "off".into(),
+            cleanup: "auto".into(),
             groq_cleanup_model: DEFAULT_GROQ_MODEL.into(),
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
@@ -115,6 +115,10 @@ pub fn load(app: &AppHandle) -> Settings {
     // v0.1.0–0.1.1 defaulted to a Groq model that has since been retired.
     if s.version < 3 && s.groq_cleanup_model == "llama-3.3-70b-versatile" {
         s.groq_cleanup_model = DEFAULT_GROQ_MODEL.into();
+    }
+    // Up to v0.1.2 cleanup defaulted to off, even after a Groq key was added.
+    if s.version < 4 && s.cleanup == "off" {
+        s.cleanup = "auto".into();
     }
     s.version = SETTINGS_VERSION;
     s

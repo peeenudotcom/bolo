@@ -18,4 +18,9 @@ $env:CMAKE_MAKE_PROGRAM = $ninja.Source
 $env:CMAKE_C_COMPILER = "clang-cl"
 $env:CMAKE_CXX_COMPILER = "clang-cl"
 $env:CXXFLAGS_x86_64_pc_windows_msvc = "/EHsc"
-Write-Host "Windows build environment ready (clang-cl + Ninja)."
+# Local builds: skip whole-program LTO and parallelise codegen. Cuts a rebuild
+# from ~5 min to ~1–2 min for a slightly larger exe. CI release builds keep
+# the full settings from Cargo.toml.
+$env:CARGO_PROFILE_RELEASE_LTO = "false"
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16"
+Write-Host "Windows build environment ready (clang-cl + Ninja, fast local profile)."

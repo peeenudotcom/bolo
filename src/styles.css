@@ -30,10 +30,25 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  /* No sideways scrolling or two-finger swipe bounce: it's an app, not a page. */
+  overflow-x: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+}
+
+/* Keep a readable column when the window is maximised. */
+.top,
+.tabs,
+main {
+  max-width: 720px;
+  margin-inline: auto;
 }
 
 a {
@@ -271,7 +286,7 @@ button.hotkey.listening {
 
 .cheats {
   list-style: none;
-  margin: 10px 0 0;
+  margin: 10px 0 14px;
   padding: 0;
   display: grid;
   gap: 6px;

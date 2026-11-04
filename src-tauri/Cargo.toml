@@ -1,6 +1,6 @@
 [package]
 name = "bolo"
-version = "0.1.2"
+version = "0.1.3"
 description = "Free voice dictation"
 authors = ["peeenudotcom"]
 edition = "2024"

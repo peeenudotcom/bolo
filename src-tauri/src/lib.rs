@@ -151,7 +151,7 @@ fn llm_target(s: &Settings, for_command: bool) -> Option<(String, Option<String>
     let ollama = || Some((format!("{}/v1", s.ollama_url.trim_end_matches('/')), None, s.ollama_model.clone()));
     let has_key = !s.groq_api_key.trim().is_empty();
     match s.cleanup.as_str() {
-        "groq" if has_key => groq(),
+        "groq" | "auto" if has_key => groq(),
         "ollama" => ollama(),
         // Command mode needs some model even when cleanup is switched off.
         _ if for_command && has_key => groq(),
