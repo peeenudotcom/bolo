@@ -36,7 +36,8 @@ pub struct Settings {
     pub version: u32,
 }
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
+pub const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 
 #[cfg(target_os = "macos")]
 pub const DEFAULT_HOTKEY: &str = "hold:fn";
@@ -55,7 +56,7 @@ impl Default for Settings {
             groq_whisper_model: "whisper-large-v3-turbo".into(),
             language: "en".into(),
             cleanup: "off".into(),
-            groq_cleanup_model: "llama-3.3-70b-versatile".into(),
+            groq_cleanup_model: DEFAULT_GROQ_MODEL.into(),
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
             hinglish_roman: false,
@@ -110,6 +111,10 @@ pub fn load(app: &AppHandle) -> Settings {
     // offline dictation. Nobody could have picked it on purpose yet.
     if s.version < 2 && s.language == "auto" {
         s.language = "en".into();
+    }
+    // v0.1.0–0.1.1 defaulted to a Groq model that has since been retired.
+    if s.version < 3 && s.groq_cleanup_model == "llama-3.3-70b-versatile" {
+        s.groq_cleanup_model = DEFAULT_GROQ_MODEL.into();
     }
     s.version = SETTINGS_VERSION;
     s

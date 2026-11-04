@@ -27,34 +27,90 @@ pub struct Target<'a> {
     pub model: &'a str,
 }
 
-async fn chat(http: &reqwest::Client, target: Target<'_>, system: &str, user: &str) -> Result<String> {
+/// Groq models to fall back to, best first, when the configured one has been
+/// retired. Picked by measured speed and how faithfully they keep the
+/// speaker's words (Nov 2026).
+const GROQ_FALLBACKS: &[&str] = &["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+
+enum ChatError {
+    /// The model doesn't exist (any more) on this server.
+    UnknownModel(String),
+    Other(anyhow::Error),
+}
+
+async fn chat_once(http: &reqwest::Client, target: Target<'_>, system: &str, user: &str) -> Result<String, ChatError> {
     let url = format!("{}/chat/completions", target.base_url.trim_end_matches('/'));
-    let mut req = http.post(url).json(&json!({
+    let mut body = json!({
         "model": target.model,
         "temperature": 0,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ]
-    }));
+    });
+    // Reasoning models: keep the thinking short and out of the reply.
+    if target.key.is_some() {
+        if target.model.contains("gpt-oss") {
+            body["reasoning_effort"] = json!("low");
+        } else if target.model.contains("qwen3") {
+            body["reasoning_format"] = json!("hidden");
+        }
+    }
+    let mut req = http.post(url).json(&body);
     if let Some(k) = target.key {
         req = req.bearer_auth(k);
     }
-    let res = req.send().await?;
+    let res = req.send().await.map_err(|e| ChatError::Other(e.into()))?;
     let status = res.status();
     let body: serde_json::Value = res.json().await.unwrap_or_default();
     if !status.is_success() {
         let msg = body["error"]["message"]
             .as_str()
             .or(body["error"].as_str())
-            .unwrap_or("request failed");
-        return Err(anyhow!("AI {status}: {msg}"));
+            .unwrap_or("request failed")
+            .to_string();
+        let code = body["error"]["code"].as_str().unwrap_or_default();
+        let lower = msg.to_lowercase();
+        let unknown = code == "model_not_found"
+            || code == "model_decommissioned"
+            || (lower.contains("model") && (lower.contains("decommission") || lower.contains("not found") || lower.contains("does not exist")));
+        return Err(if unknown { ChatError::UnknownModel(msg) } else { ChatError::Other(anyhow!("AI {status}: {msg}")) });
     }
-    Ok(body["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .to_string())
+    let text = body["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+    Ok(strip_thinking(text))
+}
+
+/// Some models wrap their reasoning in <think> tags; never type that out.
+fn strip_thinking(text: &str) -> String {
+    let mut out = text.to_string();
+    while let (Some(a), Some(b)) = (out.find("<think>"), out.find("</think>")) {
+        if b < a {
+            break;
+        }
+        out.replace_range(a..b + "</think>".len(), "");
+    }
+    out.trim().to_string()
+}
+
+async fn chat(http: &reqwest::Client, target: Target<'_>, system: &str, user: &str) -> Result<String> {
+    match chat_once(http, target, system, user).await {
+        Ok(t) => Ok(t),
+        Err(ChatError::Other(e)) => Err(e),
+        // Only Groq gets an automatic replacement; an Ollama model is the user's choice.
+        Err(ChatError::UnknownModel(msg)) if target.key.is_none() => Err(anyhow!("AI model: {msg}")),
+        Err(ChatError::UnknownModel(msg)) => {
+            eprintln!("{} unavailable ({msg}); trying fallbacks", target.model);
+            for m in GROQ_FALLBACKS.iter().filter(|m| **m != target.model) {
+                let t = Target { model: m, ..target };
+                match chat_once(http, t, system, user).await {
+                    Ok(text) => return Ok(text),
+                    Err(ChatError::UnknownModel(_)) => continue,
+                    Err(ChatError::Other(e)) => return Err(e),
+                }
+            }
+            Err(anyhow!("No Groq AI model is available right now: {msg}"))
+        }
+    }
 }
 
 /// Command mode: rewrite `selection` per `instruction`, or write new text.
@@ -126,7 +182,40 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::expand_snippets;
+    use super::{expand_snippets, strip_thinking};
+
+    /// Live check against Groq. Set BOLO_TEST_GROQ_KEY to run.
+    #[test]
+    fn groq_cleanup_command_and_fallback() {
+        let Ok(key) = std::env::var("BOLO_TEST_GROQ_KEY") else {
+            eprintln!("skipped: BOLO_TEST_GROQ_KEY not set");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+            let base = "https://api.groq.com/openai/v1";
+            for model in [crate::settings::DEFAULT_GROQ_MODEL, "llama-3.3-70b-versatile"] {
+                let t = super::Target { base_url: base, key: Some(&key), model };
+                let start = std::time::Instant::now();
+                let out = super::run(&http, t, "um so hey can we uh meet at 4 no actually 5 tomorrow", &["Claude".into()], false, None)
+                    .await
+                    .unwrap();
+                eprintln!("cleanup [{model}] {:?}: {out}", start.elapsed());
+                assert!(out.contains('5') && !out.to_lowercase().contains("um "), "got: {out}");
+            }
+            let t = super::Target { base_url: base, key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+            let out = super::command(&http, t, "make this more polite", Some("send me the report now"), None).await.unwrap();
+            eprintln!("command: {out}");
+            assert!(out.to_lowercase().contains("report"), "got: {out}");
+        });
+    }
+
+    #[test]
+    fn thinking_is_removed() {
+        assert_eq!(strip_thinking("<think>hmm</think>\nHello there."), "Hello there.");
+        assert_eq!(strip_thinking("Plain text"), "Plain text");
+    }
 
     #[test]
     fn snippets_expand_case_insensitively() {
