@@ -27,13 +27,62 @@ pub enum K {
     Fn,
     Space,
     Esc,
+    /// A key that types a visible character (letters, digits, punctuation).
+    Char,
+    /// Enter or Tab: what comes next starts on fresh whitespace.
+    Break,
+    /// Arrows, Home/End, Page keys, Backspace, Delete: the caret moved somewhere unknown.
+    Nav,
     Other,
 }
 
 impl K {
     fn is_modifier(self) -> bool {
-        !matches!(self, K::Space | K::Esc | K::Other)
+        matches!(
+            self,
+            K::LCtrl | K::RCtrl | K::LAlt | K::RAlt | K::LWin | K::RWin | K::LShift | K::RShift | K::Fn
+        )
     }
+
+    /// Any non-modifier key other than Space and Esc.
+    fn is_plain(self) -> bool {
+        matches!(self, K::Char | K::Break | K::Nav | K::Other)
+    }
+}
+
+// ---------- what's just before the caret ----------
+//
+// Consecutive dictations need a space between them, but Bolo can't read the
+// focused app's text. Instead it remembers what it typed last and watches the
+// keys pressed since: a letter typed (or Bolo's own text) means "text before
+// the caret", Space/Enter/Tab mean "whitespace", and arrows, Backspace or
+// shortcuts mean "unknown". A space is added only for "text".
+
+const CARET_UNKNOWN: u8 = 0;
+const CARET_SPACE: u8 = 1;
+const CARET_TEXT: u8 = 2;
+static CARET: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(CARET_UNKNOWN);
+
+fn note_typed(k: K, shortcut_held: bool) {
+    let v = match k {
+        _ if k.is_modifier() => return,
+        _ if shortcut_held => CARET_UNKNOWN,
+        K::Space | K::Break => CARET_SPACE,
+        K::Char => CARET_TEXT,
+        _ => CARET_UNKNOWN,
+    };
+    CARET.store(v, Ordering::SeqCst);
+}
+
+/// Call after Bolo types `text` into the focused app.
+pub fn note_pasted(text: &str) {
+    let v = if text.ends_with(char::is_whitespace) { CARET_SPACE } else { CARET_TEXT };
+    CARET.store(v, Ordering::SeqCst);
+}
+
+/// True when the last thing before the caret is known to be visible text.
+pub fn caret_after_text() -> bool {
+    CARET.load(Ordering::SeqCst) == CARET_TEXT
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,7 +221,7 @@ impl Machine {
                 } else if down && !command && p.command_held(&self.pressed) {
                     self.phase = Phase::Holding { command: true };
                     out.push(Action::CommandMode);
-                } else if down && k == K::Other {
+                } else if down && k.is_plain() {
                     // Ctrl+Win+D and friends: the user wanted a normal shortcut.
                     out.push(Action::Cancel);
                     self.phase = Phase::Blocked;
@@ -206,6 +255,11 @@ impl Machine {
 
     fn modifiers_down(&self) -> bool {
         self.pressed.iter().any(|k| k.is_modifier())
+    }
+
+    /// Ctrl, Alt, Win or Fn held: keys pressed now are shortcuts, not typing.
+    fn shortcut_held(&self) -> bool {
+        self.pressed.iter().any(|k| k.is_modifier() && !matches!(k, K::LShift | K::RShift))
     }
 }
 
@@ -241,10 +295,15 @@ pub fn wait_modifiers_released(max: Duration) {
 fn handle(k: K, down: bool) -> Feedback {
     prune_stale();
     let mut out = Vec::new();
-    let fb = MACHINE
-        .lock()
-        .unwrap()
-        .feed(k, down, RECORDING.load(Ordering::SeqCst), &mut out);
+    let fb = {
+        let mut m = MACHINE.lock().unwrap();
+        let shortcut = m.shortcut_held();
+        let fb = m.feed(k, down, RECORDING.load(Ordering::SeqCst), &mut out);
+        if down && !fb.suppress {
+            note_typed(k, shortcut);
+        }
+        fb
+    };
     if let Some(tx) = TX.get() {
         let tx = tx.lock().unwrap();
         for a in out {
@@ -314,6 +373,9 @@ mod win {
             0xA1 => K::RShift,
             0x20 => K::Space,
             0x1B => K::Esc,
+            0x0D | 0x09 => K::Break,
+            0x08 | 0x2E | 0x21..=0x28 => K::Nav,
+            0x30..=0x39 | 0x41..=0x5A | 0x60..=0x6F | 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2 => K::Char,
             _ => K::Other,
         }
     }
@@ -330,7 +392,7 @@ mod win {
             K::RShift => 0xA1,
             K::Space => 0x20,
             K::Esc => 0x1B,
-            K::Fn | K::Other => return None,
+            K::Fn | K::Char | K::Break | K::Nav | K::Other => return None,
         })
     }
 
@@ -440,6 +502,9 @@ mod mac {
                                 let k = match code {
                                     49 => K::Space,
                                     53 => K::Esc,
+                                    36 | 76 | 48 => K::Break,
+                                    51 | 117 | 115 | 119 | 116 | 121 | 123..=126 => K::Nav,
+                                    0..=47 | 50 | 65..=92 => K::Char,
                                     _ => K::Other,
                                 };
                                 handle(k, matches!(etype, CGEventType::KeyDown))
@@ -485,6 +550,17 @@ mod linux {
             Key::Function => K::Fn,
             Key::Space => K::Space,
             Key::Escape => K::Esc,
+            Key::Return | Key::KpReturn | Key::Tab => K::Break,
+            Key::Backspace | Key::Delete | Key::Home | Key::End | Key::PageUp | Key::PageDown
+            | Key::UpArrow | Key::DownArrow | Key::LeftArrow | Key::RightArrow => K::Nav,
+            Key::KeyA | Key::KeyB | Key::KeyC | Key::KeyD | Key::KeyE | Key::KeyF | Key::KeyG
+            | Key::KeyH | Key::KeyI | Key::KeyJ | Key::KeyK | Key::KeyL | Key::KeyM | Key::KeyN
+            | Key::KeyO | Key::KeyP | Key::KeyQ | Key::KeyR | Key::KeyS | Key::KeyT | Key::KeyU
+            | Key::KeyV | Key::KeyW | Key::KeyX | Key::KeyY | Key::KeyZ | Key::Num0 | Key::Num1
+            | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8
+            | Key::Num9 | Key::BackQuote | Key::Minus | Key::Equal | Key::LeftBracket
+            | Key::RightBracket | Key::SemiColon | Key::Quote | Key::BackSlash | Key::IntlBackslash
+            | Key::Comma | Key::Dot | Key::Slash => K::Char,
             _ => K::Other,
         }
     }
@@ -585,6 +661,25 @@ mod tests {
         m.feed(K::Esc, false, false, &mut out);
         assert!(m.feed(K::Esc, true, true, &mut out).suppress);
         assert_eq!(out, vec![Action::Cancel]);
+    }
+
+    #[test]
+    fn caret_tracking() {
+        note_pasted("Hello there.");
+        assert!(caret_after_text());
+        note_typed(K::Space, false);
+        assert!(!caret_after_text());
+        note_typed(K::Char, false);
+        assert!(caret_after_text());
+        note_typed(K::Break, false); // Enter, e.g. message sent
+        assert!(!caret_after_text());
+        note_pasted("Line\n");
+        assert!(!caret_after_text());
+        note_typed(K::Char, true); // Ctrl+A etc. is a shortcut, not typing
+        assert!(!caret_after_text());
+        note_pasted("x");
+        note_typed(K::LShift, false); // modifiers alone change nothing
+        assert!(caret_after_text());
     }
 
     #[test]

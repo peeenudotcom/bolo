@@ -7,12 +7,16 @@ use crate::audio::TARGET_RATE;
 
 pub type WhisperCache = Mutex<Option<(PathBuf, WhisperContext)>>;
 
-fn vocab_prompt(terms: &[String]) -> Option<String> {
-    if terms.is_empty() {
-        None
-    } else {
-        Some(format!("Vocabulary: {}.", terms.join(", ")))
+fn transcription_prompt(terms: &[String], hinglish_roman: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if !terms.is_empty() {
+        parts.push(format!("Vocabulary: {}.", terms.join(", ")));
     }
+    // Whisper takes example transcript text, rather than instructions.
+    if hinglish_roman {
+        parts.push("Haan, main Hindi aur English mein baat karta hoon. Kal meeting ke baad report bhej dena.".into());
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// Whisper always encodes a 30 s window (1500 frames, 50 per second). For a
@@ -31,8 +35,9 @@ pub fn local(
     audio: &[f32],
     language: &str,
     terms: &[String],
+    hinglish_roman: bool,
 ) -> Result<String> {
-    local_with(cache, model, audio, language, terms, true)
+    local_with(cache, model, audio, language, terms, hinglish_roman, true)
 }
 
 fn local_with(
@@ -41,6 +46,7 @@ fn local_with(
     audio: &[f32],
     language: &str,
     terms: &[String],
+    hinglish_roman: bool,
     trim: bool,
 ) -> Result<String> {
     let mut guard = cache.lock().unwrap();
@@ -74,7 +80,7 @@ fn local_with(
             params.set_audio_ctx(ctx);
         }
     }
-    let prompt = vocab_prompt(terms);
+    let prompt = transcription_prompt(terms, hinglish_roman);
     if let Some(p) = &prompt {
         params.set_initial_prompt(p);
     }
@@ -136,11 +142,11 @@ mod tests {
             .collect();
         let cache = Mutex::new(None);
         let m = Path::new(&model);
-        let _ = local(&cache, m, &audio, "en", &[]).unwrap(); // load the model once
+        let _ = local(&cache, m, &audio, "en", &[], false).unwrap(); // load the model once
         let expect = std::env::var("BOLO_TEST_EXPECT").unwrap_or_else(|_| "meeting".into());
         for (lang, trim) in [("auto", false), ("auto", true), ("en", false), ("en", true)] {
             let start = std::time::Instant::now();
-            let text = local_with(&cache, m, &audio, lang, &["Bolo".into()], trim).unwrap();
+            let text = local_with(&cache, m, &audio, lang, &["Bolo".into()], false, trim).unwrap();
             eprintln!("lang={lang:<4} trimmed={trim:<5} {:>6.2}s  {text}", start.elapsed().as_secs_f32());
             assert!(text.to_lowercase().contains(&expect), "got: {text}");
         }
@@ -161,6 +167,7 @@ pub async fn groq(
     audio: &[f32],
     language: &str,
     terms: &[String],
+    hinglish_roman: bool,
 ) -> Result<String> {
     let part = reqwest::multipart::Part::bytes(wav_bytes(audio)?)
         .file_name("audio.wav")
@@ -173,7 +180,7 @@ pub async fn groq(
     if language != "auto" {
         form = form.text("language", language.to_string());
     }
-    if let Some(p) = vocab_prompt(terms) {
+    if let Some(p) = transcription_prompt(terms, hinglish_roman) {
         form = form.text("prompt", p);
     }
     let res = http

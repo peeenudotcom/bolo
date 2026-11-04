@@ -12,10 +12,18 @@ pub enum AppKind {
     Other,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Target {
     pub app: String,
+    /// Window title, used to tell whether two dictations went to the same place.
+    pub title: String,
     pub kind: AppKind,
+}
+
+impl Default for AppKind {
+    fn default() -> Self {
+        AppKind::Other
+    }
 }
 
 const CODE_APPS: &[&str] = &[
@@ -66,9 +74,9 @@ pub fn detect() -> Target {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let kind = classify(&w.app_name, &exe, &w.title);
-            Target { app: if w.app_name.is_empty() { exe } else { w.app_name }, kind }
+            Target { app: if w.app_name.is_empty() { exe } else { w.app_name }, title: w.title, kind }
         }
-        Err(_) => Target { app: String::new(), kind: AppKind::Other },
+        Err(_) => Target::default(),
     }
 }
 
@@ -78,6 +86,16 @@ pub fn hint(kind: AppKind) -> Option<&'static str> {
         AppKind::Email => Some("The text is going into an email: use complete, well-punctuated sentences, and paragraphs if it is long."),
         AppKind::Code => Some("The user is in a code editor or terminal: keep wording literal, keep technical terms, file names and casing exactly, and add no full stop at the end."),
         AppKind::Other => None,
+    }
+}
+
+/// Joins a new dictation onto text already before the caret: adds the
+/// separating space unless the new text starts with punctuation or a break.
+pub fn join_after_text(text: &str) -> String {
+    match text.chars().next() {
+        Some(c) if c.is_whitespace() || ".,!?;:)]}'\"…".contains(c) => text.to_string(),
+        Some(_) => format!(" {text}"),
+        None => String::new(),
     }
 }
 
@@ -169,6 +187,13 @@ mod tests {
         assert_eq!(spoken_formatting("Great job, thumbs up emoji."), "Great job, 👍");
         assert_eq!(spoken_formatting("Love you heart emoji"), "Love you ❤️");
         assert_eq!(spoken_formatting("The sad truth"), "The sad truth");
+    }
+
+    #[test]
+    fn joins_with_a_space() {
+        assert_eq!(join_after_text("I'm here."), " I'm here.");
+        assert_eq!(join_after_text(", and then"), ", and then");
+        assert_eq!(join_after_text("\nNext line"), "\nNext line");
     }
 
     #[test]

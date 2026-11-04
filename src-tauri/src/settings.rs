@@ -20,7 +20,8 @@ pub struct Settings {
     pub groq_cleanup_model: String,
     pub ollama_url: String,
     pub ollama_model: String,
-    /// Write Hindi in Roman script (Hinglish) instead of Devanagari. Needs cleanup on.
+    /// Write Hindi in Roman script (Hinglish) instead of Devanagari. On by
+    /// default. Needs cleanup on.
     pub hinglish_roman: bool,
     /// One word or phrase per line. Helps spell names, brands and jargon.
     pub dictionary: String,
@@ -36,7 +37,7 @@ pub struct Settings {
     pub version: u32,
 }
 
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 5;
 pub const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 
 #[cfg(target_os = "macos")]
@@ -59,7 +60,7 @@ impl Default for Settings {
             groq_cleanup_model: DEFAULT_GROQ_MODEL.into(),
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
-            hinglish_roman: false,
+            hinglish_roman: true,
             dictionary: String::new(),
             snippets: String::new(),
             restore_clipboard: true,
@@ -119,6 +120,11 @@ pub fn load(app: &AppHandle) -> Settings {
     // Up to v0.1.2 cleanup defaulted to off, even after a Groq key was added.
     if s.version < 4 && s.cleanup == "off" {
         s.cleanup = "auto".into();
+    }
+    // Hinglish (Roman script) is more common than Devanagari for these users;
+    // before v0.1.3 it defaulted to off.
+    if s.version < 5 {
+        s.hinglish_roman = true;
     }
     s.version = SETTINGS_VERSION;
     s

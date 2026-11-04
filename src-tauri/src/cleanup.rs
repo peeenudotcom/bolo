@@ -205,6 +205,13 @@ mod tests {
                 assert!(out.contains('5') && !out.to_lowercase().contains("um "), "got: {out}");
             }
             let t = super::Target { base_url: base, key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
+            let devanagari = |s: &str| s.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c));
+            let out = super::run(&http, t, "कल मिलते हैं, meeting पांच बजे है", &[], true, None).await.unwrap();
+            eprintln!("hinglish: {out}");
+            assert!(!devanagari(&out), "still Devanagari: {out}");
+            let out = super::run(&http, t, "please send the report by friday", &[], true, None).await.unwrap();
+            eprintln!("english with hinglish on: {out}");
+            assert!(out.to_lowercase().contains("report") && out.to_lowercase().contains("friday"), "got: {out}");
             let out = super::command(&http, t, "make this more polite", Some("send me the report now"), None).await.unwrap();
             eprintln!("command: {out}");
             assert!(out.to_lowercase().contains("report"), "got: {out}");

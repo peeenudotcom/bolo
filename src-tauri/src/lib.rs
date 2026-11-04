@@ -50,7 +50,13 @@ struct AppState {
     whisper: transcribe::WhisperCache,
     history: Mutex<Vec<HistoryItem>>,
     http: reqwest::Client,
+    /// Where and when Bolo last typed, to decide on a joining space.
+    last_paste: Mutex<Option<(String, String, Instant)>>,
 }
+
+/// A follow-up dictation only gets a joining space if it lands in the same
+/// window soon after the previous one.
+const JOIN_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Serialize)]
 struct StatusEvent {
@@ -70,11 +76,12 @@ fn act(app: &AppHandle, action: Action) {
     match (action, &mut *phase) {
         (Action::Start, Phase::Idle) => match audio::Recorder::start(app.clone()) {
             Ok(rec) => {
-                let target = if state.settings.lock().unwrap().app_style {
-                    style::detect()
-                } else {
-                    style::Target { app: String::new(), kind: style::AppKind::Other }
-                };
+                // Always note the window (for spacing between dictations);
+                // only adapt the writing style when that setting is on.
+                let mut target = style::detect();
+                if !state.settings.lock().unwrap().app_style {
+                    target.kind = style::AppKind::Other;
+                }
                 *phase = Phase::Recording { rec, started: Instant::now(), hands_free: false, command: false, target };
                 hotkey::set_recording(true);
                 status(app, "recording", None);
@@ -204,13 +211,23 @@ async fn process(app: &AppHandle, rec: audio::Recorder, command: bool, target: s
         style::finish(&expanded, target.kind)
     };
 
-    let to_type = text.clone();
+    let same_place = state.last_paste.lock().unwrap().as_ref().is_some_and(|(app, title, at)| {
+        *app == target.app && *title == target.title && at.elapsed() < JOIN_WINDOW
+    });
+    let to_type = if !command && same_place && hotkey::caret_after_text() {
+        style::join_after_text(&text)
+    } else {
+        text.clone()
+    };
     let restore = s.restore_clipboard;
+    let typed = to_type.clone();
     tauri::async_runtime::spawn_blocking(move || {
         hotkey::wait_modifiers_released(Duration::from_secs(2));
         paste::type_text(&to_type, restore)
     })
     .await??;
+    hotkey::note_pasted(&typed);
+    *state.last_paste.lock().unwrap() = Some((target.app.clone(), target.title.clone(), Instant::now()));
 
     let item = HistoryItem {
         text,
@@ -245,7 +262,7 @@ async fn transcribe_any(
         _ => !s.groq_api_key.trim().is_empty(),
     };
     if use_groq {
-        match transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, &s.language, terms).await {
+        match transcribe::groq(&state.http, s.groq_api_key.trim(), &s.groq_whisper_model, &samples, &s.language, terms, s.hinglish_roman).await {
             Ok(t) => return Ok((t, "groq")),
             Err(e) if s.engine == "auto" && models::path(app, &s.local_model).exists() => {
                 eprintln!("Groq failed, falling back to local: {e}");
@@ -267,10 +284,11 @@ async fn transcribe_local(
         anyhow::bail!("Download a speech model in Bolo's settings first");
     }
     let lang = s.language.clone();
+    let hinglish_roman = s.hinglish_roman;
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();
-        transcribe::local(&state.whisper, &model, &samples, &lang, &terms)
+        transcribe::local(&state.whisper, &model, &samples, &lang, &terms, hinglish_roman)
     })
     .await?
 }
@@ -403,6 +421,7 @@ pub fn run() {
                 whisper: Mutex::new(None),
                 history: Mutex::new(Vec::new()),
                 http: reqwest::Client::builder().timeout(Duration::from_secs(600)).build()?,
+                last_paste: Mutex::new(None),
             });
 
             // Keyboard hook → actions, handled on their own thread so the
@@ -451,7 +470,7 @@ pub fn run() {
                 let wants_local = s.engine == "local" || s.groq_api_key.trim().is_empty();
                 if wants_local && model.exists() {
                     let silence = vec![0.0f32; audio::TARGET_RATE as usize];
-                    let _ = transcribe::local(&state.whisper, &model, &silence, "en", &[]);
+                    let _ = transcribe::local(&state.whisper, &model, &silence, "en", &[], s.hinglish_roman);
                 }
             });
 
