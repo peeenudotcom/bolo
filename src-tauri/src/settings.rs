@@ -32,7 +32,11 @@ pub struct Settings {
     pub app_style: bool,
     /// "new line", "new paragraph", "bullet point", "heart emoji"…
     pub spoken_formatting: bool,
+    /// Bumped when a default changes, so old settings files can be migrated.
+    pub version: u32,
 }
+
+const SETTINGS_VERSION: u32 = 2;
 
 #[cfg(target_os = "macos")]
 pub const DEFAULT_HOTKEY: &str = "hold:fn";
@@ -49,7 +53,7 @@ impl Default for Settings {
             local_model: "base".into(),
             groq_api_key: String::new(),
             groq_whisper_model: "whisper-large-v3-turbo".into(),
-            language: "auto".into(),
+            language: "en".into(),
             cleanup: "off".into(),
             groq_cleanup_model: "llama-3.3-70b-versatile".into(),
             ollama_url: "http://localhost:11434".into(),
@@ -61,6 +65,7 @@ impl Default for Settings {
             autostart: false,
             app_style: true,
             spoken_formatting: true,
+            version: SETTINGS_VERSION,
         }
     }
 }
@@ -101,6 +106,12 @@ pub fn load(app: &AppHandle) -> Settings {
     if s.hotkey == "Ctrl+Shift+Space" {
         s.hotkey = DEFAULT_HOTKEY.into();
     }
+    // v0.1.0 defaulted to automatic language detection, which costs ~2 s per
+    // offline dictation. Nobody could have picked it on purpose yet.
+    if s.version < 2 && s.language == "auto" {
+        s.language = "en".into();
+    }
+    s.version = SETTINGS_VERSION;
     s
 }
 

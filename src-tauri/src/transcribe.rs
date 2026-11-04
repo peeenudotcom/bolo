@@ -15,6 +15,15 @@ fn vocab_prompt(terms: &[String]) -> Option<String> {
     }
 }
 
+/// Whisper always encodes a 30 s window (1500 frames, 50 per second). For a
+/// short dictation most of that is padding, so only encode what was spoken
+/// plus a little headroom. Returns None when the full window is needed anyway.
+fn audio_ctx_for(samples: usize) -> Option<i32> {
+    let secs = samples as f32 / TARGET_RATE as f32;
+    let frames = ((secs * 50.0).ceil() as i32 + 128 + 63) / 64 * 64;
+    (frames < 1500).then_some(frames.max(256))
+}
+
 /// Runs whisper.cpp locally. Blocking; call from a blocking thread.
 pub fn local(
     cache: &WhisperCache,
@@ -22,6 +31,17 @@ pub fn local(
     audio: &[f32],
     language: &str,
     terms: &[String],
+) -> Result<String> {
+    local_with(cache, model, audio, language, terms, true)
+}
+
+fn local_with(
+    cache: &WhisperCache,
+    model: &Path,
+    audio: &[f32],
+    language: &str,
+    terms: &[String],
+    trim: bool,
 ) -> Result<String> {
     let mut guard = cache.lock().unwrap();
     if guard.as_ref().map(|(p, _)| p.as_path()) != Some(model) {
@@ -49,6 +69,11 @@ pub fn local(
     params.set_print_timestamps(false);
     params.set_no_context(true);
     params.set_suppress_blank(true);
+    if trim {
+        if let Some(ctx) = audio_ctx_for(audio.len()) {
+            params.set_audio_ctx(ctx);
+        }
+    }
     let prompt = vocab_prompt(terms);
     if let Some(p) = &prompt {
         params.set_initial_prompt(p);
@@ -110,13 +135,15 @@ mod tests {
             .map(|s| s.unwrap() as f32 / i16::MAX as f32)
             .collect();
         let cache = Mutex::new(None);
-        let start = std::time::Instant::now();
-        let text = local(&cache, Path::new(&model), &audio, "auto", &["Bolo".into()]).unwrap();
-        eprintln!("transcript ({:?}): {text}", start.elapsed());
-        let start = std::time::Instant::now();
-        let _ = local(&cache, Path::new(&model), &audio, "en", &[]).unwrap();
-        eprintln!("second run, model cached, language fixed: {:?}", start.elapsed());
-        assert!(text.to_lowercase().contains("meeting"), "got: {text}");
+        let m = Path::new(&model);
+        let _ = local(&cache, m, &audio, "en", &[]).unwrap(); // load the model once
+        let expect = std::env::var("BOLO_TEST_EXPECT").unwrap_or_else(|_| "meeting".into());
+        for (lang, trim) in [("auto", false), ("auto", true), ("en", false), ("en", true)] {
+            let start = std::time::Instant::now();
+            let text = local_with(&cache, m, &audio, lang, &["Bolo".into()], trim).unwrap();
+            eprintln!("lang={lang:<4} trimmed={trim:<5} {:>6.2}s  {text}", start.elapsed().as_secs_f32());
+            assert!(text.to_lowercase().contains(&expect), "got: {text}");
+        }
     }
 
     #[test]

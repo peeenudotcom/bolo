@@ -2,7 +2,7 @@
 
 Free, open-source voice dictation for Windows, macOS and Linux. Hold a shortcut, speak, let go — clean text is typed into whatever app you're using.
 
-- **Hold to talk** with just modifier keys, like Wispr Flow
+- **Hold to talk** with just two fingers: Ctrl + Win (Fn on Mac)
 - **Command mode**: select text, hold the shortcut plus Alt, say "make this more polite"
 - **Matches the app**: casual in WhatsApp/Slack, full sentences in email, literal in code editors
 - **Spoken formatting**: "new line", "new paragraph", "bullet point", "heart emoji"

@@ -63,13 +63,13 @@ let os = "windows";
 function presets(): Preset[] {
   if (os === "macos")
     return [
-      { value: "hold:fn", label: "Fn / 🌐 (like Wispr Flow)", keys: ["Fn"], extra: "Option", help: "Set “Press 🌐 key to” to “Do nothing” in System Settings → Keyboard." },
+      { value: "hold:fn", label: "Fn / 🌐 (recommended)", keys: ["Fn"], extra: "Option", help: "Set “Press 🌐 key to” to “Do nothing” in System Settings → Keyboard." },
       { value: "hold:right-cmd", label: "Right ⌘ Command", keys: ["Right ⌘"], extra: "Option" },
       { value: "hold:right-alt", label: "Right ⌥ Option", keys: ["Right ⌥"], extra: "Shift" },
     ];
   const win = os === "windows" ? "Win" : "Super";
   return [
-    { value: os === "windows" ? "hold:ctrl+win" : "hold:ctrl+super", label: `Ctrl + ${win} (like Wispr Flow)`, keys: ["Ctrl", win], extra: "Alt" },
+    { value: os === "windows" ? "hold:ctrl+win" : "hold:ctrl+super", label: `Ctrl + ${win} (recommended)`, keys: ["Ctrl", win], extra: "Alt" },
     { value: "hold:right-ctrl", label: "Right Ctrl", keys: ["Right Ctrl"], extra: "Alt" },
     { value: "hold:right-alt", label: "Right Alt", keys: ["Right Alt"], extra: "Shift" },
   ];
