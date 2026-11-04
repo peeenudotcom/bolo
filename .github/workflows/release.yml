@@ -18,9 +18,10 @@ jobs:
         include:
           - platform: windows-latest
             args: ""
-          - platform: macos-latest
+          # Both Apple targets can build on Intel; avoid the ARM runner queue.
+          - platform: macos-15-intel
             args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
+          - platform: macos-15-intel
             args: "--target x86_64-apple-darwin"
           - platform: ubuntu-22.04
             args: ""
@@ -57,7 +58,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-15-intel' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
