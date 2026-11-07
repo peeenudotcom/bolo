@@ -60,10 +60,31 @@ struct Progress<'a> {
     total: u64,
 }
 
+static DOWNLOADING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+struct DownloadGuard(String);
+impl DownloadGuard {
+    fn acquire(name: &str) -> Result<Self> {
+        anyhow::ensure!(DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_owned()), "This model is already downloading");
+        Ok(Self(name.to_owned()))
+    }
+}
+impl Drop for DownloadGuard {
+    fn drop(&mut self) { DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0); }
+}
+
+fn validate_download(downloaded: u64, expected: u64) -> Result<()> {
+    anyhow::ensure!(downloaded > 0 && (expected == 0 || downloaded == expected),
+        "The model download was incomplete. Please download it again.");
+    Ok(())
+}
+
 pub async fn download(app: &AppHandle, http: &reqwest::Client, name: &str) -> Result<()> {
     if !MODELS.iter().any(|m| m.name == name) {
         return Err(anyhow!("unknown model {name}"));
     }
+    let _download = DownloadGuard::acquire(name)?;
     let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin");
     let res = http.get(url).timeout(std::time::Duration::from_secs(3600)).send().await?.error_for_status()?;
     let total = res.content_length().unwrap_or(0);
@@ -84,8 +105,28 @@ pub async fn download(app: &AppHandle, http: &reqwest::Client, name: &str) -> Re
             let _ = app.emit("bolo://download", Progress { name, downloaded, total });
         }
     }
+    validate_download(downloaded, total)?;
     file.flush().await?;
     drop(file);
     tokio::fs::rename(&tmp, &final_path).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn duplicate_downloads_cannot_write_the_same_file() {
+        let first = DownloadGuard::acquire("test-model").unwrap();
+        assert!(DownloadGuard::acquire("test-model").is_err());
+        drop(first);
+        assert!(DownloadGuard::acquire("test-model").is_ok());
+    }
+    #[test]
+    fn empty_or_incomplete_models_are_not_installed() {
+        assert!(validate_download(0,0).is_err());
+        assert!(validate_download(100,200).is_err());
+        assert!(validate_download(200,200).is_ok());
+        assert!(validate_download(200,0).is_ok());
+    }
 }

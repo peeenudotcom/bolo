@@ -493,14 +493,16 @@ dependencies = [
 
 [[package]]
 name = "bolo"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "active-win-pos-rs",
  "anyhow",
  "arboard",
+ "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
  "cpal",
+ "earshot",
  "enigo",
  "futures-util",
  "hound",
@@ -1421,6 +1423,12 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "earshot"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afea66474c4036a7e5fa4b072a3b0a09cd0b01f00134da3115d76b7cc5899f03"
 
 [[package]]
 name = "either"

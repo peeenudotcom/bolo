@@ -1,3 +1,4 @@
+import { libraryFromFields, mergeLibrary, parseLibrary, type WordLibrary, type WordFields } from "./word-library";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -19,11 +20,24 @@ let saveQueue: Promise<void> = Promise.resolve();
 const downloading = new Map<string, number>();
 
 // ---------- tabs ----------
-document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll("[data-tab]").forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
-    document.querySelectorAll<HTMLElement>("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab.dataset.tab));
-    if (tab.dataset.tab === "history") renderHistory();
+const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-tab]"));
+function selectTab(tab: HTMLButtonElement) {
+  stopPlayback();
+  if (tab.dataset.tab === "settings") void refreshBudget();
+  tabs.forEach(t => { t.setAttribute("aria-selected", String(t === tab)); t.tabIndex = t === tab ? 0 : -1; });
+  document.querySelectorAll<HTMLElement>("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== tab.dataset.tab);
+  $("#section-label").textContent = tab.textContent;
+  window.scrollTo({ top: 0 });
+  if (tab.dataset.tab === "history") void renderHistory();
+}
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => selectTab(tab));
+  tab.addEventListener("keydown", e => {
+    const next = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1
+      : ["ArrowRight", "ArrowDown"].includes(e.key) ? (index + 1) % tabs.length
+      : ["ArrowLeft", "ArrowUp"].includes(e.key) ? (index + tabs.length - 1) % tabs.length : -1;
+    if (next < 0) return;
+    e.preventDefault(); tabs[next].focus(); selectTab(tabs[next]);
   });
 });
 
@@ -129,6 +143,15 @@ function renderShortcut() {
 }
 
 function applyVisibility() {
+  $("#engine-help").textContent = settings.engine === "local"
+    ? "Audio stays on this computer. AI cleanup, if enabled, still sends text to OpenAI."
+    : "OpenAI handles speech recognition. Mixed mode uses automatic detection with English, Hindi and Punjabi context.";
+  const connected = Boolean(String(settings.openai_api_key ?? "").trim());
+  $("#connection-title").textContent = connected ? "OpenAI key saved" : "Connect OpenAI";
+  $("#connection-help").textContent = connected
+    ? "Your key is stored on this computer. Requests use your OpenAI API balance; availability is checked when you dictate."
+    : "Add a key for cloud dictation and Roman Hindi / Punjabi. You can also use offline recognition.";
+  $("#roman-help").hidden = !settings.hinglish_roman || (settings.cleanup !== "off" && connected);
   document.querySelectorAll<HTMLElement>("[data-show]").forEach((el) => {
     const [key, vals] = el.dataset.show!.split("=");
     el.hidden = !vals.split(",").includes(String(settings[key]));
@@ -138,6 +161,11 @@ function applyVisibility() {
 function bindFields() {
   document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("[data-key]").forEach((el) => {
     const key = el.dataset.key!;
+    if (!el.labels?.length && !el.hasAttribute("aria-label")) {
+      const label = el.closest(".row")?.querySelector(".label > span")?.textContent
+        ?? el.closest(".group")?.querySelector("h2")?.textContent;
+      if (label) el.setAttribute("aria-label", label);
+    }
     if (el instanceof HTMLInputElement && el.type === "checkbox") {
       el.checked = Boolean(settings[key]);
       el.addEventListener("change", () => {
@@ -155,6 +183,63 @@ function bindFields() {
     }
   });
 }
+
+// ---------- portable word library ----------
+let pendingLibrary: WordLibrary | undefined;
+const wordFields = (): WordFields => ({
+  dictionary: String(settings.dictionary ?? ""), corrections: String(settings.corrections ?? ""),
+  snippets: String(settings.snippets ?? ""),
+});
+function dismissImport() { pendingLibrary = undefined; $("#words-preview").hidden = true; }
+for (const key of ["dictionary", "corrections", "snippets"])
+  document.querySelector('[data-key="' + key + '"]')!.addEventListener("input", dismissImport);
+$("#export-words").addEventListener("click", () => {
+  try {
+    const library = libraryFromFields(wordFields());
+    const url = URL.createObjectURL(new Blob([JSON.stringify(library, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a"); link.href = url; link.download = "bolo-words.json";
+    document.body.append(link); link.click(); link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+    $("#words-result").textContent = "Word library exported. Share this file only with people who should see these entries.";
+  } catch (e) { $("#words-result").textContent = String(e); }
+});
+$("#import-words").addEventListener("click", () => $<HTMLInputElement>("#words-file").click());
+$("#words-file").addEventListener("change", async () => {
+  dismissImport(); $("#words-result").textContent = "";
+  const input = $<HTMLInputElement>("#words-file"), file = input.files?.[0]; input.value = "";
+  if (!file) return;
+  try {
+    if (file.size > 3 * 1024 * 1024) throw new Error("Choose a word library smaller than 3 MB.");
+    const incoming = parseLibrary(JSON.parse(await file.text()));
+    const merged = mergeLibrary(wordFields(), incoming);
+    pendingLibrary = incoming;
+    $("#words-summary").textContent = merged.added + " new entries · " + merged.skipped + " skipped. Existing entries are kept.";
+    $("#words-conflicts").replaceChildren(...merged.conflicts.map(trigger => {
+      const li = document.createElement("li"); li.textContent = "Kept existing replacement for: " + trigger; return li;
+    }));
+    $<HTMLButtonElement>("#apply-words").disabled = !merged.added;
+    $("#words-preview").hidden = false;
+  } catch (e) { $("#words-result").textContent = String(e); }
+});
+$("#cancel-words").addEventListener("click", dismissImport);
+$("#apply-words").addEventListener("click", async () => {
+  if (!pendingLibrary) return;
+  const before = wordFields(), merged = mergeLibrary(before, pendingLibrary);
+  const button = $<HTMLButtonElement>("#apply-words"); button.disabled = true;
+  window.clearTimeout(saveTimer);
+  const editors = Array.from(document.querySelectorAll<HTMLTextAreaElement>('[data-panel="words"] textarea'));
+  editors.forEach(el => el.disabled = true);
+  Object.assign(settings, merged.fields);
+  try {
+    await save();
+    for (const key of ["dictionary", "corrections", "snippets"] as const)
+      $<HTMLTextAreaElement>('[data-key="' + key + '"]').value = String(settings[key]);
+    dismissImport(); $("#words-result").textContent = merged.added + " entries added. Existing entries were kept.";
+  } catch (e) {
+    Object.assign(settings, before);
+    $("#words-result").textContent = "Import could not be saved: " + String(e);
+  } finally { button.disabled = false; editors.forEach(el => el.disabled = false); }
+});
 
 // ---------- shortcut recorder ----------
 const hotkeyBtn = $<HTMLButtonElement>("#hotkey");
@@ -261,6 +346,7 @@ async function renderModels() {
 }
 
 async function download(name: string) {
+  if (downloading.has(name)) return;
   downloading.set(name, 0);
   renderModels();
   try {
@@ -294,23 +380,54 @@ function actionButton(label: string, fn: () => Promise<unknown>) {
   button.addEventListener("click", async () => { button.disabled = true; try { await fn(); } catch (e) { showStatus(String(e), true); } finally { button.disabled = false; } });
   return button;
 }
+let playingAudio: HTMLAudioElement | undefined;
+let playbackUrl: string | undefined;
+let historyGeneration = 0;
+function stopPlayback() {
+  if (playingAudio) {
+    playingAudio.pause();
+    playingAudio.removeAttribute("src");
+    playingAudio.load();
+    playingAudio.remove();
+  }
+  if (playbackUrl) URL.revokeObjectURL(playbackUrl);
+  playingAudio = undefined; playbackUrl = undefined;
+}
 async function renderHistory() {
+  const generation = ++historyGeneration;
+  stopPlayback();
   const items = await invoke<HistoryItem[]>("get_history");
+  if (generation !== historyGeneration) return;
   const query = $<HTMLInputElement>("#history-search").value.toLowerCase();
   const list = $("#history");
   list.replaceChildren(...items.filter(h => (h.text + h.raw + h.app).toLowerCase().includes(query)).map(h => {
     const li = document.createElement("li");
     const text = document.createElement("div"); text.className = "transcript"; text.textContent = h.text || h.raw || "Recording saved — retry to transcribe.";
     const when = document.createElement("span"); when.className = "when";
-    when.textContent = [new Date(h.at).toLocaleString(), h.app, h.engine, h.status].filter(Boolean).join(" · ");
+    const statusNames: Record<string,string> = { pasted:"Pasted", ready:"Ready to copy", failed:"Needs attention", cancelled:"Cancelled", processing:"Processing", interrupted:"Interrupted" };
+    when.textContent = [new Date(h.at).toLocaleString(), h.app, statusNames[h.status] ?? h.status].filter(Boolean).join(" · ");
     li.append(text, when);
     if (h.error) { const error = document.createElement("p"); error.className = "error"; error.textContent = h.error; li.append(error); }
     const actions = document.createElement("div"); actions.className = "actions";
+    if (h.has_audio) actions.append(actionButton("Listen", async () => {
+      const data = await invoke<ArrayBuffer>("history_audio", { id: h.id });
+      if (generation !== historyGeneration || li.closest("[hidden]")) return;
+      stopPlayback();
+      playbackUrl = URL.createObjectURL(new Blob([data], { type: "audio/wav" }));
+      playingAudio = document.createElement("audio");
+      playingAudio.controls = true;
+      playingAudio.setAttribute("aria-label", "Original recording");
+      playingAudio.src = playbackUrl;
+      li.append(playingAudio);
+      showStatus("Original recording · playback uses no API credits");
+      playingAudio.focus();
+    }));
     if (h.text || h.raw) actions.append(actionButton("Copy", async () => { await navigator.clipboard.writeText(h.text || h.raw); showStatus("Copied"); }));
-    if (h.has_audio && !h.command) actions.append(actionButton("Retry", async () => { await invoke("retry_dictation", { id: h.id }); await renderHistory(); }));
+    if (h.has_audio && !h.command) actions.append(actionButton("Retry", async () => { window.clearTimeout(saveTimer); await save(); await invoke("retry_dictation", { id: h.id }); await renderHistory(); }));
     actions.append(actionButton("Delete", async () => { await invoke("delete_history", { id: h.id }); await renderHistory(); }));
-    const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Raw transcript & spelling correction"; details.append(summary);
+    const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Original transcript & corrections"; details.append(summary);
     const raw = document.createElement("p"); raw.textContent = h.raw; raw.className = "transcript"; details.append(raw);
+    const source = document.createElement("small"); source.textContent = h.engine ? "Recognition: " + h.engine : ""; details.append(source);
     const heard = document.createElement("input"); heard.type = "text"; heard.placeholder = "Heard as"; heard.setAttribute("aria-label", "Incorrect word or phrase"); heard.maxLength = 120;
     const wanted = document.createElement("input"); wanted.type = "text"; wanted.placeholder = "Always write as"; wanted.setAttribute("aria-label", "Preferred spelling"); wanted.maxLength = 120;
     const teach = document.createElement("div"); teach.className = "actions"; teach.append(heard, wanted, actionButton("Remember correction", async () => {
@@ -335,14 +452,16 @@ listen("bolo://history", () => {
   if (!$<HTMLElement>('[data-panel="history"]').hidden) renderHistory();
 });
 
-listen<{ state: string; message?: string }>("bolo://state", (e) => {
-
-  const busy = e.payload.state === "processing" || e.payload.state === "recording";
+function applyActivity(status: { state: string; message?: string }) {
+  void refreshBudget();
+  if (status.state === "recording") stopPlayback();
+  const busy = status.state === "processing" || status.state === "recording";
   $("#activity").hidden = !busy;
-  $("#activity-text").textContent = e.payload.message || (e.payload.state === "recording" ? "Listening…" : "Processing…");
-  if (e.payload.state === "error") { showStatus(e.payload.message ?? "Error", true); }
-
-});
+  $("#activity-text").textContent = status.message || (status.state === "recording" ? "Listening…" : "Processing…");
+  if (status.state === "error") showStatus(status.message ?? "Error", true);
+  else if (status.state === "idle" || status.state === "recording") showStatus("");
+}
+listen<{ state: string; message?: string }>("bolo://state", (e) => applyActivity(e.payload));
 
 
 $("#cancel-processing").addEventListener("click", () => void invoke("cancel_processing"));
@@ -389,12 +508,36 @@ async function checkForUpdates() {
   finally { button.disabled=false; }
 }
 $("#check-update").addEventListener("click", () => void checkForUpdates());
+type Budget = { month: string; limit_cents: number; used_micros: number };
+function displayBudget(b: Budget, updateInput = false) {
+  const used = b.used_micros / 1_000_000, limit = b.limit_cents / 100;
+  $("#budget-summary").textContent = `${b.month} · Estimated $${used.toFixed(4)} of $${limit.toFixed(2)} · ${limit === 0 ? "Cloud requests paused" : used >= limit ? "Limit reached" : `$${Math.max(0, limit-used).toFixed(2)} remaining`}`;
+  $<HTMLProgressElement>("#budget-progress").value = limit > 0 ? Math.min(100, used / limit * 100) : 100;
+  if (updateInput) $<HTMLInputElement>("#budget-limit").value = limit.toFixed(2);
+}
+async function refreshBudget(updateInput = false) {
+  try { displayBudget(await invoke<Budget>("get_budget"), updateInput); }
+  catch (e) { $("#budget-summary").textContent = String(e); }
+}
+$("#budget-save").addEventListener("click", async () => {
+  const input = $<HTMLInputElement>("#budget-limit"), button = $<HTMLButtonElement>("#budget-save");
+  if (!input.value.trim() || !input.reportValidity() || !Number.isFinite(input.valueAsNumber)) return;
+  button.disabled = true;
+  try {
+    const b = await invoke<Budget>("set_budget", { limitCents: Math.round(input.valueAsNumber * 100) });
+    displayBudget(b, true); $("#budget-feedback").textContent = "Limit saved. Recorded usage has not been reset.";
+  } catch(e) { $("#budget-feedback").textContent = String(e); }
+  finally { button.disabled = false; }
+});
+window.addEventListener("focus", () => { void refreshBudget(); });
+
 // ---------- boot ----------
 (async () => {
   settings = await invoke<Settings>("get_settings");
   os = await invoke<string>("platform");
+  await refreshBudget(true);
   const initialStatus = await invoke<{ state: string; message?: string }>("get_status");
-  if (initialStatus.state === "error") showStatus(initialStatus.message ?? "Bolo could not start", true);
+  applyActivity(initialStatus);
 
   for (const select of document.querySelectorAll<HTMLSelectElement>('.style-grid select')) {
     for (const [value,label] of [["formal","Formal — Hello, team."],["casual","Casual — Hello, team"],["lowercase","Lowercase — hello, team"],["literal","Literal — preserve wording"]]) select.add(new Option(label,value));
@@ -403,11 +546,14 @@ $("#check-update").addEventListener("click", () => void checkForUpdates());
   $("#context-row").hidden = os !== "windows";
   bindFields();
   applyVisibility();
+  if (!settings.openai_key_saved && !String(settings.openai_api_key ?? "").trim()) {
+    $<HTMLDetailsElement>("#connection-details").open = true;
+  }
   renderShortcut();
   if(settings.check_updates) void checkForUpdates();
   await renderModels();
   const models = await invoke<Model[]>("list_models");
-  if (!models.some((m) => m.downloaded) && !String(settings.groq_api_key).trim()) {
-    showStatus("Download a model or add a Groq key to start");
+  if (!models.some((m) => m.downloaded) && !String(settings.openai_api_key).trim()) {
+    showStatus("Download a model or configure a speech engine to start");
   }
 })();

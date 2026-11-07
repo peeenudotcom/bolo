@@ -14,7 +14,7 @@ fn transcription_prompt(terms: &[String], hinglish_roman: bool) -> Option<String
     }
     // Whisper takes example transcript text, rather than instructions.
     if hinglish_roman {
-        parts.push("Haan, main Hindi aur English mein baat karta hoon. Kal meeting ke baad report bhej dena.".into());
+        parts.push("Kal meri meeting hai, please send the report. Theek aa ji, kal milde haan.".into());
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -109,7 +109,7 @@ fn local_with(
     Ok(text.trim().to_string())
 }
 
-fn wav_bytes(audio: &[f32]) -> Result<Vec<u8>> {
+pub(crate) fn wav_bytes(audio: &[f32]) -> Result<Vec<u8>> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: TARGET_RATE,
@@ -130,119 +130,6 @@ fn wav_bytes(audio: &[f32]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compare_native_and_roman_prompts() {
-        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_MODELS_DIR")) else { return; };
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
-            let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
-                .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
-            for name in ["short-hindi", "meeting", "mixed-roman", "mixed-long", "english"] {
-                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
-                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
-                for (label, prompt) in [
-                    ("roman", transcription_prompt(&terms, true)),
-                    ("native", Some(format!("हाँ, मैं Hindi और English में बात करता हूँ। कल meeting के बाद report भेज देना। Vocabulary: {}.", terms.join(", ")))),
-                ] {
-                    let raw = groq_with_prompt(&http, &key, "whisper-large-v3-turbo", &samples, "auto", prompt).await.unwrap();
-                    eprintln!("{name} {label}: {raw}");
-                    let target = crate::cleanup::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
-                    let cleaned = crate::cleanup::run(&http, target, &raw, &terms, true, None).await.unwrap();
-                    eprintln!("{name} {label} cleaned: {cleaned}");
-                    assert!(!raw.is_empty());
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn compare_whisper_accuracy() {
-        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_MODELS_DIR")) else { return; };
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
-            let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
-                .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
-            for name in ["short-hindi", "mixed-roman", "english"] {
-                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
-                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
-                for model in ["whisper-large-v3-turbo", "whisper-large-v3"] {
-                    let started = std::time::Instant::now();
-                    let raw = groq(&http, &key, model, &samples, "auto", &terms, true).await.unwrap();
-                    eprintln!("{name} {model} {:?}: {raw}", started.elapsed());
-                    assert!(!raw.is_empty());
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn compare_mixed_speech_prompts() {
-        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_COMPARE_SPEECH_DIR")) else { return; };
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
-            for name in ["mixed-roman", "hindi", "english"] {
-                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
-                let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
-                for (language, roman) in [("auto", false), ("auto", true), ("hi", false)] {
-                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, language, &[], roman).await.unwrap();
-                    eprintln!("{name} language={language} roman_prompt={roman}: {raw}");
-                }
-                let terms: Vec<String> = std::env::var("BOLO_TEST_VOCABULARY").unwrap_or_default()
-                    .split('|').filter(|s| !s.is_empty()).map(str::to_string).collect();
-                let mut raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, "auto", &terms, true).await.unwrap();
-                if crate::cleanup::needs_hindi_retry(&raw, "auto", true) {
-                    raw = groq(&http, &key, "whisper-large-v3-turbo", &samples, "hi", &terms, false).await.unwrap();
-                }
-                let target = crate::cleanup::Target { base_url: "https://api.groq.com/openai/v1", key: Some(&key), model: crate::settings::DEFAULT_GROQ_MODEL };
-                let out = crate::cleanup::run(&http, target, &raw, &terms, true, None).await.unwrap();
-                eprintln!("{name} corrected pipeline: {out}");
-                crate::cleanup::ensure_roman_output(&out).unwrap();
-                if name == "english" { assert!(out.to_lowercase().contains("document") && out.to_lowercase().contains("friday")); }
-                if name == "mixed-roman" { assert!(out.to_lowercase().contains("chatgpt") && out.to_lowercase().contains("kal"), "{out}"); }
-            }
-        });
-    }
-
-    /// Optional full Groq speech + cleanup check. Supply 16 kHz mono i16 WAVs
-    /// named hindi.wav, mixed.wav and english.wav in BOLO_TEST_SPEECH_DIR.
-    #[test]
-    fn groq_speech_script_modes() {
-        let (Ok(key), Ok(dir)) = (crate::settings::live_test_key(), std::env::var("BOLO_TEST_SPEECH_DIR")) else {
-            eprintln!("skipped: BOLO_TEST_GROQ_KEY / BOLO_TEST_SPEECH_DIR not set");
-            return;
-        };
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let http = reqwest::Client::new();
-            let target = crate::cleanup::Target {
-                base_url: "https://api.groq.com/openai/v1", key: Some(&key),
-                model: crate::settings::DEFAULT_GROQ_MODEL,
-            };
-            for name in ["hindi", "mixed", "english"] {
-                let mut reader = hound::WavReader::open(Path::new(&dir).join(format!("{name}.wav"))).unwrap();
-                assert_eq!(reader.spec().sample_rate, TARGET_RATE);
-                assert_eq!(reader.spec().channels, 1);
-                let audio: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / i16::MAX as f32).collect();
-                for roman in [true, false] {
-                    let raw = groq(&http, &key, "whisper-large-v3-turbo", &audio, "auto", &[], roman).await.unwrap();
-                    let out = crate::cleanup::run(&http, target, &raw, &[], roman, None).await.unwrap();
-                    eprintln!("{name} roman={roman}: raw={raw} -> {out}");
-                    assert!(!out.is_empty());
-                    let devanagari = out.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c));
-                    assert_eq!(devanagari, !roman && name != "english", "{out}");
-                    if name == "mixed" {
-                        assert!(out.to_lowercase().contains("report"), "{out}");
-                    } else if name == "english" {
-                        assert!(out.to_lowercase().contains("document") && out.to_lowercase().contains("friday"), "{out}");
-                    }
-                }
-            }
-        });
-    }
 
     /// Set BOLO_TEST_MODEL (a ggml .bin) and BOLO_TEST_WAV (16 kHz mono) to run.
     #[test]
@@ -288,50 +175,4 @@ mod tests {
             assert!(error.to_string().contains("null character"));
         }
     }
-}
-
-/// Groq's hosted Whisper (OpenAI-compatible endpoint).
-pub async fn groq(
-    http: &reqwest::Client,
-    key: &str,
-    model: &str,
-    audio: &[f32],
-    language: &str,
-    terms: &[String],
-    hinglish_roman: bool,
-) -> Result<String> {
-    groq_with_prompt(http, key, model, audio, language, transcription_prompt(terms, hinglish_roman)).await
-}
-
-async fn groq_with_prompt(
-    http: &reqwest::Client, key: &str, model: &str, audio: &[f32],
-    language: &str, prompt: Option<String>,
-) -> Result<String> {
-    let part = reqwest::multipart::Part::bytes(wav_bytes(audio)?)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")?;
-    let mut form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model", model.to_string())
-        .text("response_format", "json")
-        .text("temperature", "0");
-    if language != "auto" {
-        form = form.text("language", language.to_string());
-    }
-    if let Some(p) = prompt {
-        form = form.text("prompt", p);
-    }
-    let res = http
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .bearer_auth(key)
-        .multipart(form)
-        .send()
-        .await?;
-    let status = res.status();
-    let body: serde_json::Value = res.json().await.context("Groq returned invalid JSON")?;
-    if !status.is_success() {
-        let msg = body["error"]["message"].as_str().unwrap_or("request failed");
-        return Err(anyhow!("Groq {status}: {msg}"));
-    }
-    Ok(body["text"].as_str().context("Groq response contains no transcript")?.trim().to_string())
 }

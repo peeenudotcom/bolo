@@ -1,209 +1,161 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Bolo</title>
-    <link rel="stylesheet" href="/src/styles.css" />
-  </head>
-  <body>
-    <header class="top">
-      <div>
-        <h1>Bolo</h1>
-        <p class="lede" id="lede">Hold your shortcut anywhere, speak, and let go.</p>
-      </div>
-      <span class="save-state" id="save-state" aria-live="polite"></span>
-    </header>
-
-    <nav class="tabs" role="tablist">
-      <button role="tab" aria-selected="true" data-tab="general">General</button>
-      <button role="tab" aria-selected="false" data-tab="words">Words</button>
-      <button role="tab" aria-selected="false" data-tab="history">History</button>
-    </nav>
-    <div id="activity" class="activity" hidden role="status"><span id="activity-text"></span><button id="cancel-processing" class="btn">Cancel</button></div>
-
-    <main>
-      <section data-panel="general">
-        <div class="group">
-          <h2>Shortcut</h2>
-          <div class="row">
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Bolo</title><link rel="stylesheet" href="/src/styles.css"/></head>
+<body><div class="app-shell">
+<aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Bolo</span></div><nav class="tabs" role="tablist" aria-label="Bolo sections"><button id="tab-general" role="tab" aria-controls="panel-general" aria-selected="true" tabindex="0" data-tab="general"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0Z"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8"/></svg><span>Dictation</span></button><button id="tab-words" role="tab" aria-controls="panel-words" aria-selected="false" tabindex="-1" data-tab="words"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7a3 3 0 0 1 3 3v14a4 4 0 0 0-4-2H4ZM20 4h-3a3 3 0 0 0-3 3v14a4 4 0 0 1 4-2h2Z"/></svg><span>Words</span></button><button id="tab-history" role="tab" aria-controls="panel-history" aria-selected="false" tabindex="-1" data-tab="history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2"/></svg><span>History</span></button><button id="tab-settings" role="tab" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg><span>Settings</span></button></nav><div class="sidebar-note">A little less typing.<br/>A little more you.</div></aside>
+<div class="workspace"><header class="top"><span id="section-label">Dictation</span><span class="save-state" id="save-state" role="status" aria-live="polite"></span></header>
+<div id="activity" class="activity" hidden role="status"><span id="activity-text"></span><button id="cancel-processing" class="btn">Cancel</button></div>
+<main>
+<section data-panel="general" id="panel-general" role="tabpanel" aria-labelledby="tab-general">
+<div class="page-heading"><h1>Speak. Bolo types.</h1><p>Use your voice wherever you write.</p></div>
+<div class="dictation-guide"><div class="guide-symbol" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div><p class="lede" id="lede">Hold your shortcut, speak, and let go.</p><small>Click a text field in any app before you start.</small></div>
+<div class="group"><h2>Language & writing</h2><div class="row">
+            <div class="label">
+              <span>Language</span>
+              <small>English, Hindi and Punjabi, including mixed speech.</small>
+            </div>
+            <select data-key="language">
+              <option value="en">English</option>
+              <option value="auto">Automatic / mixed</option>
+              <option value="hi">Hindi</option>
+              <option value="pa">Punjabi</option>
+            </select>
+          </div><label class="row">
+            <div class="label">
+              <span>Write Hindi & Punjabi in Roman letters</span>
+              <small>“Kal milte hain” and “kal milde haan”. Turn off for Devanagari and Gurmukhi. English stays English.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="hinglish_roman" />
+          </label><p id="roman-help" class="notice" hidden>Roman letters need AI cleanup and an OpenAI connection. Enable cleanup in Formatting or connect in Settings.</p></div>
+<div class="group"><h2>Microphone & shortcut</h2><div class="row stack">
+            <label for="microphone">Microphone</label>
+            <select id="microphone" data-key="microphone"><option value="">System default</option></select>
+            <div class="actions"><button class="btn" id="refresh-microphones">Refresh devices</button><button class="btn" id="test-microphone">Test microphone</button><meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone level"></meter></div>
+            <small id="mic-help">Test for 5 seconds. Test audio is never saved or sent.</small>
+          </div><div class="row">
             <div class="label">
               <span>Hold to talk</span>
               <small id="hotkey-help"></small>
             </div>
             <select id="hotkey-preset" aria-label="Shortcut"></select>
-          </div>
-          <div class="row" id="custom-row" hidden>
+          </div><div class="row" id="custom-row" hidden>
             <div class="label">
               <span>Your key combo</span>
               <small>Click, then press the keys. Tap it for hands-free.</small>
             </div>
             <button class="hotkey" id="hotkey" type="button">Ctrl+Shift+Space</button>
-          </div>
-          <ul class="cheats" id="cheats"></ul>
-          <label class="row">
-            <div class="label"><span>Start Bolo when I log in</span></div>
-            <input type="checkbox" class="switch" data-key="autostart" />
-          </label>
-        </div>
-
-        <div class="group">
-          <h2>Speech to text</h2>
-          <div class="row stack">
-            <label for="microphone">Microphone</label>
-            <select id="microphone" data-key="microphone"><option value="">System default</option></select>
-            <div class="actions"><button class="btn" id="refresh-microphones">Refresh devices</button><button class="btn" id="test-microphone">Test microphone</button><meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone level"></meter></div>
-            <small id="mic-help">Test for 5 seconds. Test audio is never saved or sent.</small>
-          </div>
-          <div class="row">
+          </div><details class="disclosure" open><summary>More ways to dictate</summary><ul class="cheats" id="cheats"></ul><p class="hint">Paste last dictation: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd>. Copy last: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>. Maximum recording: 2 minutes.</p></details></div>
+<div class="group"><h2>Formatting</h2><div class="row">
             <div class="label">
-              <span>Engine</span>
-              <small id="engine-help">Uses Groq when you add a key, otherwise runs offline.</small>
+              <span>Clean up dictation</span>
+              <small>Remove fillers, tidy punctuation and apply spoken corrections.</small>
             </div>
-            <select data-key="engine">
-              <option value="auto">Automatic</option>
-              <option value="local">Offline only</option>
-              <option value="groq">Groq only</option>
+            <select data-key="cleanup">
+              <option value="auto">On when connected</option>
+              <option value="off">Off</option>
+              <option value="openai">On</option>
             </select>
-          </div>
-          <div class="row">
+          </div><label class="row">
             <div class="label">
-              <span>Language</span>
-              <small>Use Automatic for English, Hindi or mixed speech. A fixed language can be faster offline.</small>
+              <span>Spoken formatting</span>
+              <small>Punctuation, paragraphs, lists, quotes, brackets, symbols and emoji.</small>
             </div>
-            <select data-key="language">
-              <option value="en">English</option>
-              <option value="auto">Automatic</option>
-              <option value="hi">Hindi</option>
-              <option value="pa">Punjabi</option>
-              <option value="ur">Urdu</option>
-              <option value="bn">Bengali</option>
-              <option value="ta">Tamil</option>
-              <option value="te">Telugu</option>
-              <option value="mr">Marathi</option>
-              <option value="gu">Gujarati</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="de">German</option>
-            </select>
-          </div>
-          <div class="row stack">
+            <input type="checkbox" class="switch" data-key="spoken_formatting" />
+          </label><label class="row">
             <div class="label">
-              <span>Groq API key <em>optional, free</em></span>
-              <small>Stored in your OS credential store. Re-enter to replace, or clear to remove. Get a free key at <a href="https://console.groq.com/keys" data-external>console.groq.com/keys</a>.</small>
+              <span>Match the app I'm typing in</span>
+              <small>Casual in WhatsApp and Slack, full sentences in email, literal in code editors.</small>
             </div>
-            <input type="password" data-key="groq_api_key" placeholder="gsk_…" autocomplete="off" spellcheck="false" />
-          </div>
-        </div>
-
-        <div class="group">
-          <h2>Offline models</h2>
-          <p class="hint">Pick one to use without internet. Bigger is more accurate but slower.</p>
-          <ul class="models" id="models"></ul>
-        </div>
-
-        <div class="group">
-          <h2>Smart formatting</h2>
-          <div class="row stack"><span>Writing styles</span><small>Formatting preferences, without changing your meaning.</small>
+            <input type="checkbox" class="switch" data-key="app_style" />
+          </label><details class="disclosure" data-show="app_style=true"><summary>Writing style for each app</summary><div class="row stack"><span>Writing styles</span><small>Formatting preferences, without changing your meaning.</small>
             <div class="style-grid">
               <label>Chat<select data-key="chat_style"></select></label>
               <label>Email<select data-key="email_style"></select></label>
               <label>Code<select data-key="code_style"></select></label>
               <label>Other apps<select data-key="other_style"></select></label>
             </div>
-          </div>
-          <label class="row" id="context-row"><div class="label"><span>Use nearby text for spelling</span><small>Windows only. Reads up to 300 characters in the focused text field and sends them to your chosen cleanup service. Off by default; standard password fields are excluded. Custom fields may not identify themselves correctly.</small></div><input type="checkbox" class="switch" data-key="context_enabled" /></label>
-          <label class="row">
-            <div class="label">
-              <span>Match the app I'm typing in</span>
-              <small>Casual in WhatsApp and Slack, full sentences in email, literal in code editors.</small>
-            </div>
-            <input type="checkbox" class="switch" data-key="app_style" />
-          </label>
-          <label class="row">
-            <div class="label">
-              <span>Spoken formatting</span>
-              <small>Say “new line”, “new paragraph”, “bullet point” or “heart emoji”.</small>
-            </div>
-            <input type="checkbox" class="switch" data-key="spoken_formatting" />
-          </label>
-        </div>
+          </div></details><div class="format-help"><details>
+            <summary>What can I say for formatting?</summary>
+            <p class="hint"><strong>Breaks:</strong> new line, next line, line break, skip a line, new paragraph, start a new paragraph.</p>
+            <p class="hint"><strong>Punctuation:</strong> comma, period, full stop, question mark, exclamation mark, colon, semicolon, ellipsis, em dash.</p>
+            <p class="hint"><strong>Lists:</strong> “bullet point milk, bullet point eggs” or “numbered list milk, next item eggs, end list”.</p>
+            <p class="hint"><strong>Quotes and brackets:</strong> open quote / close quote, open parenthesis / close parenthesis, open bracket / close bracket, open brace / close brace.</p>
+            <p class="hint"><strong>Symbols:</strong> at sign, underscore, forward slash, hyphen, decimal point, percent sign, plus sign, equals sign, hash sign, ampersand.</p>
+            <p class="hint"><strong>Emoji:</strong> heart emoji, thumbs up emoji, folded hands emoji, smile emoji and more.</p>
+            <p class="hint"><strong>With AI cleanup:</strong> clear number, currency and time formatting; email addresses; lists; corrections such as “Tuesday, no wait, Wednesday”. Keep names and important numbers in mind when checking the result. These spoken command phrases are in English and can be used within mixed speech.</p>
+          </details></div></div>
+</section>
+<section data-panel="words" id="panel-words" role="tabpanel" aria-labelledby="tab-words" hidden>
+<div class="page-heading"><h1>Words</h1><p>Make room for the words you use every day.</p></div>
+<div class="group"><h2>Move your word library</h2>
+<p class="hint">Share vocabulary, corrections and snippets with another office laptop. API keys, settings and recordings are never included.</p>
+<div class="actions"><button id="export-words" class="btn">Export words</button><button id="import-words" class="btn">Import words</button><input id="words-file" type="file" accept=".json,application/json" hidden /></div>
+<div id="words-preview" class="library-preview" hidden><p id="words-summary" role="status"></p><ul id="words-conflicts"></ul><div class="actions"><button id="apply-words" class="btn">Add new entries</button><button id="cancel-words" class="btn">Cancel</button></div></div>
+<p id="words-result" class="hint" role="status"></p></div>
 
         <div class="group">
-          <h2>Cleanup</h2>
-          <div class="row">
-            <div class="label">
-              <span>Polish my words with AI</span>
-              <small>Removes “um”s, fixes punctuation, applies your corrections.</small>
-            </div>
-            <select data-key="cleanup">
-              <option value="auto">Automatic (on when a Groq key is added)</option>
-              <option value="off">Off</option>
-              <option value="groq">Groq (needs key)</option>
-              <option value="ollama">Ollama (offline)</option>
-            </select>
-          </div>
-          <div class="row" data-show="cleanup=groq,auto">
-            <div class="label"><span>Groq model</span></div>
-            <input type="text" data-key="groq_cleanup_model" spellcheck="false" />
-          </div>
-          <div class="row" data-show="cleanup=ollama">
-            <div class="label"><span>Ollama address</span></div>
-            <input type="text" data-key="ollama_url" spellcheck="false" />
-          </div>
-          <div class="row" data-show="cleanup=ollama">
-            <div class="label"><span>Ollama model</span></div>
-            <input type="text" data-key="ollama_model" spellcheck="false" />
-          </div>
-          <label class="row">
-            <div class="label">
-              <span>Write Hindi as Hinglish</span>
-              <small>On: “kal milte hain”. Off: “कल मिलते हैं”. English stays English. Keep AI cleanup on for script conversion.</small>
-            </div>
-            <input type="checkbox" class="switch" data-key="hinglish_roman" />
-          </label>
-          <label class="row">
-            <div class="label">
-              <span>Keep my clipboard</span>
-              <small>Puts back whatever you had copied after Bolo types.</small>
-            </div>
-            <input type="checkbox" class="switch" data-key="restore_clipboard" />
-          </label>
-        </div>
-        <div class="group">
-          <h2>History & recovery</h2>
-          <div class="row"><div class="label"><span>Keep dictations</span><small>Up to 20 entries. Saved history stays on this computer.</small></div><select data-key="history_retention"><option value="session">Until Bolo quits</option><option value="day">24 hours</option><option value="week">7 days</option></select></div>
-          <label class="row"><div class="label"><span>Save recordings for retry</span><small>With saved history, keeps audio for the same period. Off: audio can only be retried until Bolo quits.</small></div><input type="checkbox" class="switch" data-key="save_audio" /></label>
-          <p class="hint">Paste last dictation: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd>. Copy last: <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>. Dictations stop automatically after 2 minutes.</p>
-          <label class="row"><div class="label"><span>Check for updates on startup</span><small>Checks published GitHub releases. Nothing is installed automatically.</small></div><input type="checkbox" class="switch" data-key="check_updates" /></label>
-          <button id="check-update" class="btn">Check for updates</button><span id="update-result" role="status"></span>
-        </div>
-      </section>
-
-      <section data-panel="words" hidden>
-        <div class="group">
-          <h2>Dictionary</h2>
+          <h2>Your vocabulary</h2>
           <p class="hint">Names, brands and jargon Bolo should spell right. One per line.</p>
-          <textarea data-key="dictionary" rows="7" spellcheck="false" placeholder="Peeenu&#10;Tauri&#10;Ludhiana"></textarea>
+          <textarea data-key="dictionary" rows="7" spellcheck="false" placeholder="Add a word or name, one per line"></textarea>
         </div>
         <div class="group"><h2>Always write it this way</h2><p class="hint">Teach recurring mistakes. One correction per line, such as <code>bolo app => Bolo</code>. Matches whole words and phrases.</p><textarea data-key="corrections" rows="5" spellcheck="false" placeholder="misspelling => preferred spelling"></textarea></div>
         <div class="group">
           <h2>Snippets</h2>
           <p class="hint">Say the phrase on the left and Bolo types the right. One per line, use <code>\n</code> for a new line.</p>
-          <textarea data-key="snippets" rows="7" spellcheck="false" placeholder="my email => you@example.com&#10;my address => 12 Mall Road, Ludhiana"></textarea>
+          <textarea data-key="snippets" rows="7" spellcheck="false" placeholder="my email => you@example.com&#10;my address => your address"></textarea>
         </div>
       </section>
-
-      <section data-panel="history" hidden>
+<section data-panel="history" id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+<div class="page-heading"><h1>History</h1><p>Your recent words, ready to copy or recover.</p></div>
         <div class="group">
           <h2>Recent dictations</h2>
-          <p class="hint">Text is saved here before pasting. Retry updates the entry without typing into another app. Review recovered text, then copy it or use the paste-last shortcut.</p>
+          <p class="hint">Retry processes a recording again. It updates the saved text without pasting into another app.</p>
           <div class="actions"><input id="history-search" type="search" placeholder="Search dictations" aria-label="Search dictations" /><button id="clear-history" class="btn">Clear history</button></div>
           <ul class="history" id="history"></ul>
         </div>
       </section>
-    </main>
-
-    <script type="module" src="/src/main.ts"></script>
-  </body>
-</html>
+<section data-panel="settings" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+<div class="page-heading"><h1>Settings</h1><p>Connection, privacy and a few personal preferences.</p></div>
+<div class="group" id="monthly-budget"><h2>Monthly budget</h2>
+<p id="budget-summary" role="status" aria-live="polite">Loading estimated usage…</p>
+<progress id="budget-progress" max="100" value="0" aria-label="Monthly budget used"></progress>
+<div class="row"><label class="label" for="budget-limit">Monthly limit (USD)<small>Set $0 to pause all cloud requests.</small></label><input id="budget-limit" type="number" min="0" max="10000" step="0.01" value="20" style="max-width:160px" /></div>
+<button id="budget-save" class="btn" type="button">Save limit</button>
+<p id="budget-feedback" role="status" aria-live="polite"></p>
+<p class="hint">Tracks Bolo on this computer from this update onward. Resets on the first of each month at 00:00 UTC. It does not include earlier usage, other laptops or apps, and is not your OpenAI credit balance.</p>
+<details class="disclosure"><summary>How the limit works</summary><p class="hint">Before each cloud request, Bolo checks that enough budget remains and saves a conservative estimate. Cleanup uses returned token counts when available. Cancelled, failed or interrupted requests keep their reserved estimate because billing is uncertain. This can stop Bolo slightly early. Prices can change; this is a local estimated limit, not a guaranteed account billing cap. Fully offline recognition with AI cleanup off remains available.</p><p class="hint">Rates checked 7 November 2026. <a href="https://platform.openai.com/usage" data-external>Check actual OpenAI usage</a>.</p></details>
+</div>
+<div class="group"><h2>Connection</h2><div class="connection-state"><span class="connection-dot" aria-hidden="true"></span><div><strong id="connection-title">Checking connection settings…</strong><p id="connection-help" class="hint">Cloud recognition uses your OpenAI API balance.</p></div></div><details id="connection-details" class="disclosure"><summary>Manage API key</summary><div class="row stack">
+            <div class="label">
+              <span>OpenAI API key <em>speech + cleanup</em></span>
+              <small>Stored in your OS credential store. Re-enter to replace, or clear to remove. Uses your OpenAI API balance, separately from ChatGPT usage. Manage keys at <a href="https://platform.openai.com/api-keys" data-external>OpenAI Platform</a>.</small>
+            </div>
+            <input type="password" data-key="openai_api_key" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+          </div></details><details class="disclosure"><summary>Offline & recognition settings</summary><div class="row">
+            <div class="label">
+              <span>Recognition</span>
+              <small id="engine-help">OpenAI speech recognition and optional offline recognition.</small>
+            </div>
+            <select data-key="engine">
+              <option value="auto">Automatic</option>
+              <option value="local">Offline only</option>
+              <option value="openai">Cloud only</option>
+            </select>
+          </div><div data-show="engine=auto,local"><div class="group">
+          <h2>Offline models</h2>
+          <p class="hint">Pick one to use without internet. Bigger is more accurate but slower.</p>
+          <ul class="models" id="models"></ul>
+        </div></div></details></div>
+<div class="group"><h2>Privacy & recovery</h2><div class="row"><div class="label"><span>Keep dictations</span><small>Up to 20 entries. Saved history stays on this computer.</small></div><select data-key="history_retention"><option value="session">Until Bolo quits</option><option value="day">24 hours</option><option value="week">7 days</option></select></div><label class="row"><div class="label"><span>Save recordings for retry</span><small>With saved history, keeps audio for the same period. Off: audio can only be retried until Bolo quits.</small></div><input type="checkbox" class="switch" data-key="save_audio" /></label><label class="row">
+            <div class="label">
+              <span>Keep my clipboard</span>
+              <small>Puts back whatever you had copied after Bolo types.</small>
+            </div>
+            <input type="checkbox" class="switch" data-key="restore_clipboard" />
+          </label><label class="row" id="context-row"><div class="label"><span>Use nearby text for spelling</span><small>Windows only. Reads up to 300 characters in the focused text field and sends them to your chosen cleanup service. Off by default; standard password fields are excluded. Custom fields may not identify themselves correctly.</small></div><input type="checkbox" class="switch" data-key="context_enabled" /></label></div>
+<div class="group"><h2>On this computer</h2><label class="row">
+            <div class="label"><span>Start Bolo when I log in</span></div>
+            <input type="checkbox" class="switch" data-key="autostart" />
+          </label><label class="row"><div class="label"><span>Check for updates on startup</span><small>Checks published GitHub releases. Nothing is installed automatically.</small></div><input type="checkbox" class="switch" data-key="check_updates" /></label><div class="update-actions"><button id="check-update" class="btn">Check for updates</button><span id="update-result" role="status"></span></div></div>
+</section>
+</main><footer>Settings save automatically.</footer></div></div>
+<script type="module" src="/src/main.ts"></script></body></html>

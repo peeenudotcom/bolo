@@ -7,6 +7,8 @@ use crate::settings::Settings;
 pub struct Item {
     pub id: u64,
     pub text: String,
+    /// True only after cleanup and script checks pass, even if pasting fails.
+    pub finished: bool,
     pub raw: String,
     pub at: u64,
     pub engine: String,
@@ -18,6 +20,12 @@ pub struct Item {
     pub has_audio: bool,
     #[serde(skip)]
     pub audio: Vec<f32>,
+}
+
+impl Item {
+    pub fn recoverable(&self) -> bool {
+        !self.text.is_empty() && (self.finished || matches!(self.status.as_str(), "ready" | "pasted"))
+    }
 }
 
 pub fn now() -> u64 {
@@ -106,6 +114,19 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".scratch").join(format!("history-{name}-{}-{}", std::process::id(), now()))
     }
     fn item(id: u64) -> Item { Item { id, at: now(), text: "Thank you".into(), audio: vec![0.0, 0.5, -0.5], status: "processing".into(), ..Default::default() } }
+    #[test]
+    fn recovery_skips_failed_cleanup_but_keeps_failed_pastes() {
+        let mut value = Item { text: "raw unconverted text".into(), status: "failed".into(), ..Default::default() };
+        assert!(!value.recoverable());
+        value.finished = true;
+        assert!(value.recoverable());
+        value.finished = false;
+        value.status = "pasted".into();
+        assert!(value.recoverable()); // compatibility with older saved history
+        value.text.clear();
+        assert!(!value.recoverable());
+    }
+
     #[test]
     fn persistent_audio_and_interrupted_work_recover() {
         let s = Settings { history_retention: "day".into(), save_audio: true, ..Default::default() };
