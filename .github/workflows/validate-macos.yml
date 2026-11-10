@@ -14,14 +14,16 @@ jobs:
         include:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-          - runner: macos-15
+            xcode: 26.1.1
+          - runner: macos-26
             target: aarch64-apple-darwin
+            xcode: 26.4.1
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@v4
-      - run: sudo xcode-select -s /Applications/Xcode_26.1.1.app/Contents/Developer
+      - run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
       - uses: actions/setup-node@v4
         with:
           node-version: 22
