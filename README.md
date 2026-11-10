@@ -1,6 +1,6 @@
 # Bolo
 
-Free, open-source voice dictation for Windows, macOS and Linux. Hold a shortcut, speak, let go — clean text is typed into whatever app you're using.
+Free, open-source voice dictation for Windows and macOS. Hold a shortcut, speak, let go — clean text is typed into whatever app you're using.
 
 - **Hold to talk** with just two fingers: Ctrl + Win (Fn on Mac)
 - **Command mode**: select text, hold the shortcut plus Alt, say "make this more polite"
@@ -32,13 +32,12 @@ Download the installer for your computer from [Releases](../../releases):
 | Windows | `Bolo_x.y.z_x64-setup.exe` |
 | Mac (Apple Silicon) | `Bolo_x.y.z_aarch64.dmg` |
 | Mac (Intel) | `Bolo_x.y.z_x64.dmg` |
-| Linux | `.AppImage` or `.deb` |
 
 On first launch, download an offline model (Base is a good start) or add an [OpenAI API key](https://platform.openai.com/api-keys).
 
 **Mac:** the app isn't notarized yet, so right-click → Open the first time. Allow **Microphone** and **Accessibility** (System Settings → Privacy & Security) so Bolo can hear you and type for you.
 
-**Linux:** typing into other apps works on X11. Wayland support depends on your desktop.
+**Linux:** prebuilt releases are paused. Older releases and the source remain available; Linux is outside the current supported download scope.
 
 ## English, Hindi, Hinglish and Punjabi
 
