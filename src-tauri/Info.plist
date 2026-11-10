@@ -3,7 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Bolo listens while you hold your shortcut so it can turn your speech into text.</string>
+  <string>Bolo records your microphone when you dictate or explicitly start a meeting.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Bolo captures system audio for live meeting captions when you start a meeting. Screen images are not saved or uploaded.</string>
   <key>LSUIElement</key>
   <false/>
 </dict>

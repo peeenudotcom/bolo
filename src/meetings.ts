@@ -61,7 +61,7 @@ export async function refreshMeetings() {
   }catch(e){el("meeting-error").textContent=String(e);}
 }
 async function devices(){
-  try{const names=await invoke<string[]>("meeting_devices");const select=el<HTMLSelectElement>("meeting-output");const old=select.value;select.replaceChildren(new Option("System default speakers / headphones",""));for(const name of names)select.add(new Option(name,name));select.value=names.includes(old)?old:"";}
+  try{const names=await invoke<string[]>("meeting_devices");const select=el<HTMLSelectElement>("meeting-output");const old=select.value;select.replaceChildren(new Option(navigator.platform.includes("Mac")?"All computer audio":"System default speakers / headphones",""));for(const name of names)select.add(new Option(name,name));select.value=names.includes(old)?old:"";}
   catch(e){el("meeting-error").textContent=String(e);el<HTMLButtonElement>("meeting-start").disabled=true;}
 }
 el("meeting-refresh-devices").onclick=()=>void devices();

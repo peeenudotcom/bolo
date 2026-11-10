@@ -61,6 +61,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Wi
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"
 core-graphics = "0.25.0"
+screencapturekit = "=11.1.2"
+sherpa-onnx = { version = "=2.0.1", default-features = false, features = ["static"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rdev = "0.5.3"

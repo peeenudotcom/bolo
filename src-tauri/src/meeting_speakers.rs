@@ -23,7 +23,7 @@ pub fn meeting_speaker_models(app:AppHandle)->bool {dir(&app).is_ok_and(|dir|MOD
 #[tauri::command]
 pub async fn meeting_download_speaker_models(app:AppHandle)->Result<(),String> {
     async {
-        ensure!(cfg!(windows),"Meeting speaker labels currently require Windows");
+        ensure!(cfg!(any(windows,target_os="macos")),"Meeting speaker labels require Windows or macOS");
         ensure!(!DOWNLOADING.swap(true,Ordering::AcqRel),"Speaker models are already downloading");let _guard=Guard;
         let dir=dir(&app)?;std::fs::create_dir_all(&dir)?;
         for (name,url,size,hash) in MODELS {
@@ -47,7 +47,7 @@ fn label(start:u64,end:u64,segments:&[Segment])->Option<String> {
     for s in segments {let overlap=end.min(s.end_ms).saturating_sub(start.max(s.start_ms));if overlap>=100 {labels.insert(s.speaker.clone());duration+=overlap;}}
     if duration<200 {None} else if labels.len()==1 {labels.into_iter().next()} else {Some("Multiple speakers".into())}
 }
-#[cfg(windows)]
+#[cfg(any(windows,target_os="macos"))]
 pub fn analyze(models:&Path,audio:&Path)->Result<Vec<Segment>> {
     use sherpa_onnx::*;
     ensure!(MODELS.iter().all(|(name,_,size,hash)|valid(&models.join(name),*size,hash)),"Download the speaker-label models first (41 MB). Captions remain available.");
@@ -70,8 +70,8 @@ pub fn analyze(models:&Path,audio:&Path)->Result<Vec<Segment>> {
     }
     Ok(segments)
 }
-#[cfg(not(windows))]
-pub fn analyze(_models:&Path,_audio:&Path)->Result<Vec<Segment>> {anyhow::bail!("Speaker labelling currently requires Windows")}
+#[cfg(not(any(windows,target_os="macos")))]
+pub fn analyze(_models:&Path,_audio:&Path)->Result<Vec<Segment>> {anyhow::bail!("Speaker labelling requires Windows or macOS")}
 
 pub fn finish(app:&AppHandle,c:&crate::meetings::Control)->Result<()> {
     let models=dir(app)?;

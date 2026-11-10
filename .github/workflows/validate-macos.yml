@@ -1,0 +1,47 @@
+name: Validate macOS
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['src-tauri/**', 'src/**', '.github/workflows/validate-macos.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --release --lib --manifest-path src-tauri/Cargo.toml
+      - run: npm run tauri build -- --bundles app
+      - name: Verify signed bundle and native runtime
+        run: |
+          APP=src-tauri/target/release/bundle/macos/Bolo.app
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv --verbose=4 "$APP" 2>&1
+          otool -L "$APP/Contents/MacOS/bolo"
+          "$APP/Contents/MacOS/bolo" --check-runtime
+          ditto -c -k --sequesterRsrc --keepParent "$APP" Bolo-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bolo-${{ matrix.target }}-validation
+          path: Bolo-${{ matrix.target }}.zip

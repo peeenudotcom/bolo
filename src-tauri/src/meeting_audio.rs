@@ -8,7 +8,10 @@ pub struct Packet { pub start_ms: u64, pub samples: Vec<f32> }
 struct Raw { at: u64, rate: u32, samples: Vec<f32> }
 
 pub fn outputs() -> Result<Vec<String>> {
-    ensure!(cfg!(windows), "Online meeting capture is currently available on Windows.");
+    ensure!(cfg!(any(windows, target_os="macos")), "Online meeting capture requires Windows or macOS.");
+    #[cfg(target_os="macos")]
+    return Ok(vec![]);
+    #[cfg(not(target_os="macos"))]
     Ok(cpal::default_host().output_devices()?.filter_map(|d| d.description().ok().map(|d| d.name().to_owned())).collect())
 }
 
@@ -18,30 +21,11 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Raw>(128);
     let failed = Arc::new(AtomicBool::new(false));
     let setup = (|| -> Result<_> {
-        ensure!(cfg!(windows), "Online meeting capture is currently available on Windows.");
-        let host = cpal::default_host();
-        let device = if name.is_empty() {
-            if output { host.default_output_device() } else { host.default_input_device() }
-        } else {
-            let mut devices = if output { host.output_devices()? } else { host.input_devices()? };
-            devices.find(|d| d.description().is_ok_and(|d| d.name() == name))
-        }.context("Selected meeting audio device is unavailable. Refresh devices and try again.")?;
-        let config = if output { device.default_output_config()? } else { device.default_input_config()? };
-        let rate = config.sample_rate(); let channels = config.channels() as usize;
-        ensure!(rate > 0 && channels > 0, "Invalid meeting audio format");
-        let format = config.sample_format(); let config: cpal::StreamConfig = config.into();
-        // On Windows cpal enables WASAPI loopback when an output device is opened as input.
-        let stream = match format {
-            cpal::SampleFormat::F32 => stream::<f32>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
-            cpal::SampleFormat::I16 => stream::<i16>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
-            cpal::SampleFormat::U16 => stream::<u16>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
-            cpal::SampleFormat::I32 => stream::<i32>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
-            _ => bail!("Unsupported meeting audio format"),
-        };
+        ensure!(cfg!(any(windows, target_os="macos")), "Online meeting capture requires Windows or macOS.");
+        let capture = start_capture(output, name, epoch, raw_tx, failed.clone())?;
         let writer = hound::WavWriter::create(path, hound::WavSpec { channels:1, sample_rate:16000,
             bits_per_sample:16, sample_format:hound::SampleFormat::Int })?;
-        stream.play()?;
-        Ok((stream,writer))
+        Ok((capture,writer))
     })();
     let (stream, mut writer) = match setup { Ok(value) => { let _=ready.send(Ok(())); value }, Err(e) => {
         let _=ready.send(Err(anyhow::anyhow!(e.to_string()))); return Err(e);
@@ -81,6 +65,7 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
         }
         Ok(())
     })();
+    let stopped=stream.stop();
     drop(stream);
     // Finish queued callback packets, so Stop does not discard the final words.
     for raw in raw_rx.try_iter() {
@@ -91,7 +76,7 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
     }
     let tail = if !buffer.is_empty() { tx.try_send(Packet {start_ms:buffer_start,samples:buffer}).map_err(|_|anyhow::anyhow!("Final audio could not reach live transcription. The recording has been saved.")) } else {Ok(())};
     writer.finalize().context("Could not finish saving meeting audio")?;
-    result?; tail
+    result?; stopped?; tail
 }
 
 fn stream<T>(device:&cpal::Device, config:cpal::StreamConfig, channels:usize, rate:u32,
@@ -104,4 +89,48 @@ where T:cpal::SizedSample, f32:cpal::FromSample<T> {
         let at=(epoch.elapsed().as_millis() as u64).saturating_sub(duration);
         if tx.try_send(Raw {at,rate,samples}).is_err() { failed.store(true,Ordering::Release); }
     }, move |_| {error.store(true,Ordering::Release);},None)?)
+}
+
+#[cfg(target_os="macos")]
+#[path="meeting_audio_macos.rs"]
+mod macos;
+
+enum Capture {
+    Microphone(cpal::Stream),
+    #[cfg(target_os="macos")]
+    System(screencapturekit::stream::sc_stream::SCStream),
+}
+impl Capture {
+    fn stop(&self)->Result<()> {
+        match self {
+            Self::Microphone(stream)=>{stream.pause()?;Ok(())},
+            #[cfg(target_os="macos")]
+            Self::System(stream)=>{stream.stop_capture()?;Ok(())},
+        }
+    }
+}
+fn start_capture(output:bool,name:String,epoch:Instant,raw_tx:mpsc::SyncSender<Raw>,failed:Arc<AtomicBool>)->Result<Capture> {
+    #[cfg(target_os="macos")]
+    if output {return macos::start(epoch,raw_tx,failed).map(Capture::System);}
+    let host = cpal::default_host();
+    let device = if name.is_empty() {
+        if output { host.default_output_device() } else { host.default_input_device() }
+    } else {
+        let mut devices = if output { host.output_devices()? } else { host.input_devices()? };
+        devices.find(|d| d.description().is_ok_and(|d| d.name() == name))
+    }.context("Selected meeting audio device is unavailable. Refresh devices and try again.")?;
+    let config = if output { device.default_output_config()? } else { device.default_input_config()? };
+    let rate = config.sample_rate(); let channels = config.channels() as usize;
+    ensure!(rate > 0 && channels > 0, "Invalid meeting audio format");
+    let format = config.sample_format(); let config: cpal::StreamConfig = config.into();
+    // On Windows cpal enables WASAPI loopback when an output device is opened as input.
+    let stream = match format {
+        cpal::SampleFormat::F32 => stream::<f32>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
+        cpal::SampleFormat::I16 => stream::<i16>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
+        cpal::SampleFormat::U16 => stream::<u16>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
+        cpal::SampleFormat::I32 => stream::<i32>(&device, config, channels, rate, epoch, raw_tx, failed.clone())?,
+        _ => bail!("Unsupported meeting audio format"),
+    };
+    stream.play()?;
+    Ok(Capture::Microphone(stream))
 }

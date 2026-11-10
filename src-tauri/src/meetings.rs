@@ -69,7 +69,7 @@ pub fn meeting_delete(app:AppHandle,id:u64)->Result<(),String> {
 #[tauri::command]
 pub async fn meeting_start(app:AppHandle,title:String,output:String)->Result<(),String> {
     let result=(||->Result<_> {
-        ensure!(cfg!(windows),"Online meetings are currently supported on Windows.");
+        ensure!(cfg!(any(windows,target_os="macos")),"Online meetings are supported on Windows and macOS.");
         let state=app.state::<crate::AppState>();
         let settings=state.settings.lock().unwrap_or_else(|e|e.into_inner()).clone();
         ensure!(!settings.openai_api_key.trim().is_empty(),"Add your OpenAI key in Settings first.");
