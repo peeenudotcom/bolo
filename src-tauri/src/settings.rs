@@ -42,6 +42,9 @@ pub struct Settings {
     pub email_style: String,
     pub code_style: String,
     pub other_style: String,
+    /// Optional formatting preferences, bounded when used in a prompt.
+    pub writing_preferences: String,
+    pub review_before_paste: bool,
     /// Bumped when a default changes, so old settings files can be migrated.
     pub version: u32,
 }
@@ -84,6 +87,8 @@ impl Default for Settings {
             email_style: "formal".into(),
             code_style: "literal".into(),
             other_style: "formal".into(),
+            writing_preferences: String::new(),
+            review_before_paste: false,
             version: SETTINGS_VERSION,
         }
     }

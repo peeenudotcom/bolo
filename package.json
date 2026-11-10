@@ -1,13 +1,14 @@
 {
   "name": "bolo",
   "private": true,
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test:meetings": "node --test tests/meeting-transcript.test.mjs tests/text-changes.test.mjs",
     "test:words": "node --test tests/word-library.test.mjs"
   },
   "dependencies": {

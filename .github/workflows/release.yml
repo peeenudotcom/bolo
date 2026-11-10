@@ -66,6 +66,8 @@ jobs:
         run: cargo clean --manifest-path src-tauri/Cargo.toml -p sherpa-onnx-sys
 
       - run: npm ci
+      - run: npm run test:words
+      - run: npm run test:meetings
 
       - uses: tauri-apps/tauri-action@v0
         env:

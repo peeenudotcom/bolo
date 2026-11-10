@@ -23,3 +23,9 @@
 #meeting-error{color:var(--danger);white-space:pre-wrap}#meeting-error:empty{display:none}
 @media(max-width:540px){.tabs{flex-wrap:wrap}.tabs button{flex-basis:28%}}
 #meeting-running{position:sticky;top:0;z-index:4;background:var(--surface);border:1px solid var(--line)}
+
+#meeting-search{display:block;width:100%;margin:8px 0}#meeting-export-format{margin:8px 8px 8px 0}
+
+#meeting-notes-list article{border-top:1px solid var(--line);padding-block:16px}#meeting-notes-list p{white-space:pre-wrap;overflow-wrap:anywhere}.note-source{display:block;white-space:normal;text-align:left;margin:8px 0;overflow-wrap:anywhere}#meeting-notes-error{color:var(--danger)}#meeting-notes-question{margin-block:8px}
+
+.transcript ins{background:#16432f;text-decoration:underline}.transcript del{background:#5c2733;text-decoration:line-through}

@@ -1,5 +1,7 @@
 mod meeting_speakers;
 mod meetings;
+mod meeting_notes;
+mod meeting_recovery;
 mod meeting_audio;
 mod meeting_live;
 mod budget;
@@ -241,6 +243,7 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
     if raw.is_empty() || (is_noise(&raw) && formatting_only.is_none()) { anyhow::bail!("No speech recognized. Retry the recording from History."); }
     let preference = style::preference(&s, target.kind);
     let mut hint = style::preference_hint(preference).to_string();
+    hint.push_str(&cleanup::writing_hint(&s.writing_preferences));
     let mut nearby = None;
     if s.context_enabled && paste_result && style::still_target(&target) {
         let expected = target.clone();
@@ -297,6 +300,11 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
     if !command && s.hinglish_roman { cleanup::ensure_roman_output(&text)?; }
     update_history(app, id, |i| { i.text = text.clone(); i.finished = true; i.status = "ready".into(); i.error.clear(); });
     if !paste_result { return Ok(()); }
+    if s.review_before_paste {
+        update_history(app,id,|i|i.status="review".into());
+        show_main(app); let _=app.emit("bolo://review",id);
+        return Ok(());
+    }
     let same_place = state.last_paste.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(previous, at)| {
         style::same_window(previous, &target) && at.elapsed() < JOIN_WINDOW
     });
@@ -564,6 +572,21 @@ async fn retry_dictation(app: AppHandle, id: u64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn save_review(app:AppHandle,id:u64,text:String)->Result<(),String> {
+    if text.trim().is_empty()||text.len()>200_000{return Err("Enter between 1 and 200,000 bytes of text.".into());}
+    let state=app.state::<AppState>();
+    let phase=state.phase.lock().unwrap_or_else(|e|e.into_inner());
+    if !matches!(*phase,Phase::Idle){return Err("Finish processing first.".into());}
+    let settings=state.settings.lock().unwrap_or_else(|e|e.into_inner()).clone();
+    let mut store=state.history.lock().unwrap_or_else(|e|e.into_inner());
+    let index=store.items.iter().position(|i|i.id==id).ok_or("Dictation no longer available")?;
+    let previous=store.items[index].clone();
+    let item=&mut store.items[index];item.text=text;item.finished=true;item.status="ready".into();item.error.clear();
+    if let Err(e)=store.persist(&settings){if let Some(item)=store.items.iter_mut().find(|i|i.id==id){*item=previous;}return Err(e.to_string());}
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_history(app: AppHandle, id: Option<u64>) -> Result<(), String> {
     let state = app.state::<AppState>();
     // Keep recording/retry from starting between the idle check and deletion.
@@ -811,7 +834,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meetings::meeting_get, meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
+            meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meeting_recovery::meeting_recovery_quote, meeting_recovery::meeting_recover, meeting_recovery::meeting_recovery_cancel, meeting_notes::meeting_notes_get, meeting_notes::meeting_notes_generate, meetings::meeting_label_speaker, meetings::meeting_get, meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
             get_settings, get_status,
             save_settings,
             platform,
@@ -820,7 +843,7 @@ pub fn run() {
             list_models,
             download_model,
             delete_model,
-            get_history, history_audio
+            get_history, save_review, history_audio
             ,cancel_processing, retry_dictation, delete_history, list_microphones, microphone_test, check_update, teach_correction
         ])
         .run(tauri::generate_context!());

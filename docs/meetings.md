@@ -59,3 +59,55 @@ Local installation verified on 10 November 2026. The public upstream two-speaker
 ## Mac parity validation
 
 Mac system audio uses ScreenCaptureKit on macOS 13+, with a separate CoreAudio microphone. The same transcription, budget, save/export and local speaker pipeline is used on both platforms. Native CI runs on Intel and Apple Silicon, verifies the ad-hoc bundle signature and executes the packaged binary to catch loader failures. This does not replace permission and real-call testing on a user Mac. No Apple notarization is claimed.
+
+## Reviewing and exporting
+
+Search filters the displayed transcript locally, including speaker labels, without
+changing saved content. Export always includes the full meeting. Text exports retain
+unfinished drafts and recording errors. SRT subtitle exports contain final captions
+only; timings are approximate capture times, and estimated speaker labels remain
+explicitly marked. No cloud requests or extra API costs are involved in search/export.
+
+Linux installers remain paused while Windows and Mac are the office targets.
+
+## Notes and questions
+
+After Stop, Generate meeting notes requests a recap, decisions and action items.
+Ask answers one question using only that saved meeting. Both are explicit, budgeted
+OpenAI requests using the configured cleanup model; there is no automatic analysis.
+Only final captions are sent. Inputs too large for the bounded request are rejected
+before sending, never silently shortened. An interrupted meeting may only have partial
+coverage: notes describe the retained final captions, not missing speech.
+
+Every returned item must cite an exact quote from an existing final caption. Invalid
+references or altered quotes reject the response. This checks evidence references,
+not whether the AI's interpretation is correct. Review notes and source captions.
+Click quotes to jump to the transcript. Notes remain separate from captions, with the
+latest 20 request results stored locally per meeting and a separate text export.
+Deleting a meeting deletes its notes too; a pending response cannot recreate it.
+
+## Long dictation, corrections and recovery
+
+Microphone-only long recordings reuse the live capture/checkpoint path without opening
+or uploading a system-audio stream. Both recording modes stop at 60 minutes. The UI
+warns during the final five minutes; regular shortcut dictation stays at two minutes.
+This mode is original-script live captioning, not the normal Roman-output cleanup path.
+
+Speaker corrections are stored as separate user-assigned labels. A turn override wins
+against a speaker/source name. Clearing an override restores the original estimate.
+Captions themselves remain unchanged. Existing notes are not silently regenerated.
+
+Audio recovery opens retained 16 kHz mono WAVs in bounded chunks (up to 60 seconds),
+preferring quiet boundaries in the last ten seconds. It checks audio metadata against
+its checkpoint and blocks changed files. Each request uses the normal budget reservation.
+An explicit estimate precedes upload; silence detection may reduce actual usage.
+Errors stop processing without automatic API retries. Resume skips completed chunks.
+If a crash occurs after a response but before checkpoint persistence, that last chunk
+may require another charged request. The original recording and transcript are retained.
+
+Recovered captions are saved as a separate document, linked to the original recording.
+They have coarse segment timestamps and source labels, not inferred individual speakers.
+Deleting/correcting a source or output document is blocked during active recovery.
+Checkpoints verify destination ownership and cannot overwrite unrelated recordings.
+Native microphone permission, real long recordings and real interrupted-call recovery
+still require validation in the user's Windows/Mac session before office rollout.

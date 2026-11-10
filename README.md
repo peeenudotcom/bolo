@@ -262,3 +262,37 @@ from Meetings. Closing the window keeps recording; use Stop meeting.
 
 This is a Windows and macOS preview requiring a real meeting test before office rollout.
 See [implementation, research and limitations](docs/meetings.md).
+
+### Meeting review and personal writing preferences
+
+Saved meetings support local transcript search and TXT/SRT export. On request,
+Generate meeting notes creates a recap, decisions and action items; Ask answers a
+question about the saved captions. Both use the existing OpenAI key and budget.
+Results include clickable source quotes and are saved separately from the original
+transcript. They can still be wrong; review them before sharing.
+
+Dictation → Formatting → Personal writing preferences accepts optional spelling,
+punctuation and layout instructions. It starts empty and requires AI cleanup.
+Preserving spoken words, language and explicit formatting takes priority.
+
+### Review and longer recordings
+
+- **Review before pasting**, in Dictation → Formatting, is off by default. It opens
+  an editable History draft instead of typing automatically. Save/copy it or return
+  to the destination and use the paste-last shortcut. Opening the review never pastes
+  into whichever window happens to gain focus.
+- History's **What changed** compares recognition with final text, including script
+  conversion and formatting. **Copy original** deliberately bypasses those changes.
+- In Meetings, **Long dictation** captures only the microphone, for up to 60 minutes.
+  It uses the live-caption model, checkpoints audio/captions and never auto-pastes.
+  Captions retain the spoken script; regular dictation cleanup is not applied.
+  Copy final text or export it when done. The ordinary shortcut remains capped at
+  two minutes. A time-limit warning appears during the final five minutes.
+- Saved recordings support **speaker names** for a whole detected speaker or an
+  individual caption. Original estimates remain underneath; clear a name to restore
+  them. New notes and exports use corrected names; existing notes are unchanged.
+- **Recover saved audio** shows an estimate before sending audio for batch
+  transcription. It creates a separate transcript, preserving the original. Completed
+  chunks are checkpointed and skipped on resume. Cancel waits for the current request
+  before stopping. Recovery has approximate segment timing and no individual speaker
+  inference. It can still mishear speech, especially at chunk boundaries.

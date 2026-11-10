@@ -1,3 +1,4 @@
+import { textChanges } from "./text-changes";
 import { refreshMeetings } from "./meetings";
 import { libraryFromFields, mergeLibrary, parseLibrary, type WordLibrary, type WordFields } from "./word-library";
 import { invoke } from "@tauri-apps/api/core";
@@ -406,7 +407,7 @@ async function renderHistory() {
     const li = document.createElement("li");
     const text = document.createElement("div"); text.className = "transcript"; text.textContent = h.text || h.raw || "Recording saved — retry to transcribe.";
     const when = document.createElement("span"); when.className = "when";
-    const statusNames: Record<string,string> = { pasted:"Pasted", ready:"Ready to copy", failed:"Needs attention", cancelled:"Cancelled", processing:"Processing", interrupted:"Interrupted" };
+    const statusNames: Record<string,string> = { review:"Review before pasting", pasted:"Pasted", ready:"Ready to copy", failed:"Needs attention", cancelled:"Cancelled", processing:"Processing", interrupted:"Interrupted" };
     when.textContent = [new Date(h.at).toLocaleString(), h.app, statusNames[h.status] ?? h.status].filter(Boolean).join(" · ");
     li.append(text, when);
     if (h.error) { const error = document.createElement("p"); error.className = "error"; error.textContent = h.error; li.append(error); }
@@ -429,6 +430,18 @@ async function renderHistory() {
     actions.append(actionButton("Delete", async () => { await invoke("delete_history", { id: h.id }); await renderHistory(); }));
     const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Original transcript & corrections"; details.append(summary);
     const raw = document.createElement("p"); raw.textContent = h.raw; raw.className = "transcript"; details.append(raw);
+    if(h.raw)details.append(actionButton("Copy original",async()=>{await navigator.clipboard.writeText(h.raw);showStatus("Original recognition copied; formatting and script conversion are not applied.");}));
+    if(h.raw&&h.text&&h.raw!==h.text){
+      const diff=document.createElement("details");const label=document.createElement("summary");label.textContent="What changed: recognition → final text";diff.append(label);
+      const content=document.createElement("p");content.className="transcript";
+      for(const part of textChanges(h.raw,h.text)){const node=document.createElement(part.kind==='removed'?'del':part.kind==='added'?'ins':'span');node.textContent=part.text;content.append(node);}diff.append(content);details.append(diff);
+    }
+    if(h.text){
+      const review=document.createElement("details");review.open=h.status==='review';const label=document.createElement("summary");label.textContent="Review and edit";review.append(label);
+      const editor=document.createElement("textarea");editor.value=h.text;editor.setAttribute("aria-label","Reviewed dictation");editor.maxLength=200000;review.append(editor);
+      review.append(actionButton("Save reviewed text",async()=>{await invoke("save_review",{id:h.id,text:editor.value});h.text=editor.value;text.textContent=editor.value;showStatus("Saved. Return to your text field and use the paste-last shortcut, or copy this draft.");await renderHistory();}));
+      review.append(actionButton("Save and copy",async()=>{await invoke("save_review",{id:h.id,text:editor.value});h.text=editor.value;text.textContent=editor.value;await navigator.clipboard.writeText(editor.value);showStatus("Reviewed text copied. Paste it into your chosen field.");await renderHistory();}));details.append(review);if(h.status==='review')details.open=true;
+    }
     const source = document.createElement("small"); source.textContent = h.engine ? "Recognition: " + h.engine : ""; details.append(source);
     const heard = document.createElement("input"); heard.type = "text"; heard.placeholder = "Heard as"; heard.setAttribute("aria-label", "Incorrect word or phrase"); heard.maxLength = 120;
     const wanted = document.createElement("input"); wanted.type = "text"; wanted.placeholder = "Always write as"; wanted.setAttribute("aria-label", "Preferred spelling"); wanted.maxLength = 120;
@@ -449,6 +462,8 @@ $("#clear-history").addEventListener("click", async () => {
   try { await invoke("delete_history", { id: null }); await renderHistory(); } catch(e) { showStatus(String(e), true); }
   button.textContent = "Clear history";
 });
+
+listen("bolo://review", () => { selectTab($<HTMLButtonElement>('#tab-history')); });
 
 listen("bolo://history", () => {
   if (!$<HTMLElement>('[data-panel="history"]').hidden) renderHistory();
