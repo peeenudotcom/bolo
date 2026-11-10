@@ -30,3 +30,4 @@ src-tauri/target
 *.bin
 *.part
 .scratch/
+src-tauri/runtime/

@@ -182,7 +182,7 @@ where
     Ok(stream)
 }
 
-fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+pub(crate) fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == 0 || to == 0 { return Vec::new(); }
     if from == to || input.is_empty() {
         return input.to_vec();

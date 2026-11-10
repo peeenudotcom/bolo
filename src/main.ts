@@ -1,3 +1,4 @@
+import { refreshMeetings } from "./meetings";
 import { libraryFromFields, mergeLibrary, parseLibrary, type WordLibrary, type WordFields } from "./word-library";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -29,6 +30,7 @@ function selectTab(tab: HTMLButtonElement) {
   $("#section-label").textContent = tab.textContent;
   window.scrollTo({ top: 0 });
   if (tab.dataset.tab === "history") void renderHistory();
+  if (tab.dataset.tab === "meetings") void refreshMeetings();
 }
 tabs.forEach((tab, index) => {
   tab.addEventListener("click", () => selectTab(tab));

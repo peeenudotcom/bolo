@@ -1,3 +1,7 @@
+mod meeting_speakers;
+mod meetings;
+mod meeting_audio;
+mod meeting_live;
 mod budget;
 mod audio;
 mod openai;
@@ -80,6 +84,7 @@ fn act(app: &AppHandle, action: Action) {
         (s.microphone.clone(), s.app_style)
     };
     let mut phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(action, Action::Start) && app.state::<meetings::State>().active.lock().unwrap_or_else(|e| e.into_inner()).is_some() { status(app, "error", Some("Stop the meeting before dictating".into())); return; }
     if matches!(action, Action::Start) && state.mic_test.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         status(app, "error", Some("Stop the microphone test before dictating".into()));
         return;
@@ -625,6 +630,7 @@ fn microphone_test(app: AppHandle, start: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let microphone = state.settings.lock().unwrap_or_else(|e| e.into_inner()).microphone.clone();
     let phase = state.phase.lock().unwrap_or_else(|e| e.into_inner());
+    if start && app.state::<meetings::State>().active.lock().unwrap_or_else(|e|e.into_inner()).is_some() {return Err("Stop the meeting before testing the microphone".into());}
     if start && !matches!(*phase, Phase::Idle) { return Err("Finish dictation first".into()); }
     let mut test = state.mic_test.lock().unwrap_or_else(|e| e.into_inner());
     if start && test.is_none() {
@@ -711,6 +717,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             budget::init(handle.path().app_config_dir()?.join("budget.json"));
+            app.manage(meetings::State::new(handle.path().app_data_dir()?.join("meetings")));
             let (s, warning) = settings::load(&handle);
             let hotkey_str = s.hotkey.clone();
             app.manage(AppState {
@@ -765,7 +772,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app),
-                    "quit" => app.exit(0),
+                    "quit" => { if app.state::<meetings::State>().active.lock().unwrap_or_else(|e|e.into_inner()).is_some() { show_main(app); status(app,"error",Some("Stop the meeting and wait for it to save before quitting Bolo.".into())); } else {app.exit(0);} },
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, e| {
@@ -804,6 +811,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meetings::meeting_get, meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
             get_settings, get_status,
             save_settings,
             platform,

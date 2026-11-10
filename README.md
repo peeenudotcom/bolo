@@ -239,3 +239,27 @@ https://developers.openai.com/api/docs/pricing and the gpt-6-sol model page).
 Cache discounts are ignored. Provider price changes, taxes, other apps/devices
 and usage before tracking began are not covered. Check the provider dashboard
 for actual charges. Offline recognition with cleanup off needs no cloud budget.
+
+## Online meetings (Windows preview)
+
+Open **Meetings**, select the speakers/headphones used by your call, then click
+**Start meeting**. Bolo captures computer audio and your selected microphone,
+shows live OpenAI captions and saves both recordings locally. Use headphones to
+avoid echoes. All sound on the selected output device is captured; let meeting
+participants know before starting. Click **Stop meeting** to finish and save.
+
+Download the optional 41 MB speaker models once to estimate numbered speakers
+locally after stopping. Live source labels are not individual participant labels.
+Overlapping/ambiguous speakers are not forcibly assigned to one person. Captions
+preserve the spoken language/script; dictation formatting commands and AI cleanup
+are not applied. No translation is requested.
+
+Live transcription uses the existing OpenAI key and local monthly budget, at
+$0.017/minute per transmitted stream (roughly $2.04/hour for two continuous
+streams; silence filtering can reduce this). Local speaker labels cost no API
+credits. Sessions stop after 60 minutes. Saved meetings persist until deleted,
+independently of dictation History. Export text or open the saved WAV recordings
+from Meetings. Closing the window keeps recording; use Stop meeting.
+
+This is a Windows preview requiring a real meeting test before office rollout.
+See [implementation, research and limitations](docs/meetings.md).

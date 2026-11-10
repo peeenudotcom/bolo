@@ -64,6 +64,12 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # The native crate stages runtime DLLs outside cached library artifacts.
+      # Re-run its build script so a restored Rust cache cannot omit installer DLLs.
+      - name: Stage Windows meeting runtime
+        if: matrix.platform == 'windows-latest'
+        run: cargo clean --manifest-path src-tauri/Cargo.toml -p sherpa-onnx-sys
+
       - run: npm ci
 
       - uses: tauri-apps/tauri-action@v0
