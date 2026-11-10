@@ -2,7 +2,7 @@
 
 ## 30-second introduction
 
-“Bolo is a free, open-source desktop tool we are developing to reduce office typing. Staff can dictate into existing applications, use spoken punctuation and formatting, and work with English, Hindi/Hinglish and Punjabi. It combines OpenAI services with local software; we build the desktop workflow, controls and safeguards. A new Windows meeting preview adds live captions, saved recordings and estimated speaker labels. I propose a small office pilot to measure accuracy, time saved and actual API spending before wider rollout.”
+“Bolo is a free, open-source desktop tool we are developing to reduce office typing. Staff can dictate into existing applications, use spoken punctuation and formatting, and work with English, Hindi/Hinglish and Punjabi. It combines OpenAI services with local software; we build the desktop workflow, controls and safeguards. A new Windows and Mac meeting preview adds live captions, saved recordings and estimated speaker labels. I propose a small office pilot to measure accuracy, time saved and actual API spending before wider rollout.”
 
 ## What powers it
 
@@ -13,7 +13,7 @@
 | Dictation cleanup and Roman-script conversion | OpenAI `gpt-6-sol` by default | OpenAI API |
 | Offline dictation | OpenAI's open-source Whisper models through whisper.cpp | Employee's computer |
 | Live meeting captions | OpenAI `gpt-live-transcribe` | OpenAI API |
-| Meeting computer-audio capture | Windows WASAPI loopback through cpal | Employee's computer |
+| Meeting computer-audio capture | Windows WASAPI / Mac ScreenCaptureKit | Employee's computer |
 | Meeting speaker estimates after Stop | sherpa-onnx, pyannote segmentation, 3D-Speaker embeddings, ONNX Runtime | Employee's computer |
 | Shortcuts, spoken formatting, clipboard, history, budget guard | Bolo application code | Employee's computer |
 
@@ -33,7 +33,7 @@ included separately. No employee API key is included in the public installer.
 - Live meetings send microphone and selected computer-output audio to OpenAI.
   Meeting recordings/transcripts are saved locally until deleted and are not
   encrypted by Bolo. Participants should know when recording is active.
-- The current meeting preview captures all sound on the selected output device.
+- The meeting preview captures the selected output on Windows and system audio on Mac.
   Headphones avoid echoes; muting the meeting app does not mute Bolo's capture.
 - Speaker labels are estimates, produced after Stop, not verified names. Meeting
   captions preserve the original language/script and do not apply dictation cleanup.
@@ -43,7 +43,7 @@ included separately. No employee API key is included in the public installer.
 1. Dictate “Kal meri meeting hai, please send the report” into a draft document.
 2. Say “Hello team, new paragraph, please send the report, question mark.”
 3. Show the dictionary, recovery history and monthly budget controls.
-4. On Windows, demonstrate a short consented two-person call: Start meeting,
+4. On Windows or Mac, demonstrate a short consented two-person call: Start meeting,
    live captions, Stop, speaker estimates and transcript export.
 5. Check names, numbers and Punjabi wording together; do not describe accuracy as perfect.
 

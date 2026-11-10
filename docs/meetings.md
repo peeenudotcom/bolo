@@ -1,10 +1,10 @@
 # Online meetings: implementation and validation
 
-Windows preview. Meetings are independent of hold-to-talk dictation and never
+Windows and macOS preview. Meetings are independent of hold-to-talk dictation and never
 paste into the focused application. Explicit Start captures the selected playback
 endpoint through WASAPI loopback plus the dictation microphone. Headphones are
 recommended: this implementation does not perform acoustic echo cancellation.
-All audio on the selected output endpoint is captured, not just a meeting app.
+Windows captures all audio on the selected output endpoint. macOS 13+ uses ScreenCaptureKit for system audio and the selected microphone through CoreAudio; it requires Screen & System Audio Recording permission. Screen frames are not stored or uploaded. Neither platform limits capture to one meeting app.
 
 ## Decisions and primary sources (checked 10 November 2026)
 
@@ -40,7 +40,7 @@ Meetings are stored separately from dictation History and persist until explicit
 deleted. Audio is local, not encrypted by Bolo. The UI discloses capture and cloud
 upload before Start. The tray Quit action asks the user to stop/save an active
 meeting; forced termination can still interrupt it. No meeting capture occurs
-on application startup. macOS/Linux meeting capture is not implemented.
+on application startup. Linux meeting capture is not implemented. Mac native compilation, signature and runtime checks are required before release, followed by real-call testing on a user Mac.
 
 ## Validation
 
@@ -55,3 +55,7 @@ on application startup. macOS/Linux meeting capture is not implemented.
   be tested in the user's Windows session before general office rollout.
 
 Local installation verified on 10 November 2026. The public upstream two-speaker English fixture produced two clusters (2.23 s processing on this laptop). This validates that path, not Punjabi accuracy or real-call capture. Runtime ONNX 1.28.2 and speaker models are installed. Desktop call test is pending.
+
+## Mac parity validation
+
+Mac system audio uses ScreenCaptureKit on macOS 13+, with a separate CoreAudio microphone. The same transcription, budget, save/export and local speaker pipeline is used on both platforms. Native CI runs on Intel and Apple Silicon, verifies the ad-hoc bundle signature and executes the packaged binary to catch loader failures. This does not replace permission and real-call testing on a user Mac. No Apple notarization is claimed.

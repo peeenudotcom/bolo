@@ -15,6 +15,11 @@ pub(super) fn start(epoch:Instant, tx:mpsc::SyncSender<Raw>, failed:Arc<AtomicBo
     let mut stream=SCStream::new_with_delegate(&filter,&config,delegate)?;
     stream.add_output_handler(move |sample:CMSampleBuffer, kind:SCStreamOutputType| {
         if kind!=SCStreamOutputType::Audio {return;}
+        let Some(format)=sample.format_description() else {failed.store(true,Ordering::Release);return;};
+        if format.audio_sample_rate()!=Some(16000.0) || format.audio_channel_count()!=Some(1)
+            || format.audio_bits_per_channel()!=Some(32) || !format.audio_is_float() || format.audio_is_big_endian() {
+            failed.store(true,Ordering::Release);return;
+        }
         let Ok(buffers)=sample.audio_buffer_list() else {failed.store(true,Ordering::Release);return;};
         // The requested mono stream is native Float32 PCM. Reject unexpected
         // buffer shapes rather than uploading misinterpreted/corrupt samples.

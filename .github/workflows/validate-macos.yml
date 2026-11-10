@@ -21,6 +21,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@v4
+      - run: sudo xcode-select -s /Applications/Xcode_26.1.1.app/Contents/Developer
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -32,6 +33,12 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo test --release --lib --manifest-path src-tauri/Cargo.toml
+      - name: Exercise local speaker models
+        run: |
+          mkdir -p .scratch/meeting-models
+          curl -fL --retry 3 'https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a69/model.int8.onnx' -o .scratch/meeting-models/segmentation.onnx
+          curl -fL --retry 3 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx' -o .scratch/meeting-models/embedding.onnx
+          cargo test --release --lib --manifest-path src-tauri/Cargo.toml local_speaker_models_load_and_process_speech -- --ignored
       - run: npm run tauri build -- --bundles app
       - name: Verify signed bundle and native runtime
         run: |

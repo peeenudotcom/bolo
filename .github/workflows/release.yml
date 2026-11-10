@@ -27,6 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select Mac SDK
+        if: matrix.platform == 'macos-15-intel'
+        run: sudo xcode-select -s /Applications/Xcode_26.1.1.app/Contents/Developer
+
       # whisper.cpp built with MSVC is ~10x slower; use clang-cl + Ninja.
       - name: Windows build environment
         if: matrix.platform == 'windows-latest'
@@ -73,3 +77,9 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify Mac bundle signature
+        if: matrix.platform == 'macos-15-intel'
+        shell: bash
+        run: |
+          find src-tauri/target -path '*/bundle/macos/Bolo.app' -type d -print -exec codesign --verify --deep --strict --verbose=2 '{}' \;

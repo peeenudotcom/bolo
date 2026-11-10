@@ -35,7 +35,7 @@ Download the installer for your computer from [Releases](../../releases):
 
 On first launch, download an offline model (Base is a good start) or add an [OpenAI API key](https://platform.openai.com/api-keys).
 
-**Mac:** the app isn't notarized yet, so right-click → Open the first time. Allow **Microphone** and **Accessibility** (System Settings → Privacy & Security) so Bolo can hear you and type for you.
+**Mac:** requires macOS 13 or newer. The app is ad-hoc signed but not Apple-notarized. After copying Bolo to Applications, macOS may require System Settings → Privacy & Security → Open Anyway. Allow **Microphone** and **Accessibility** (System Settings → Privacy & Security) so Bolo can hear you and type for you.
 
 **Linux:** prebuilt releases are paused. Older releases and the source remain available; Linux is outside the current supported download scope.
 
@@ -239,7 +239,7 @@ Cache discounts are ignored. Provider price changes, taxes, other apps/devices
 and usage before tracking began are not covered. Check the provider dashboard
 for actual charges. Offline recognition with cleanup off needs no cloud budget.
 
-## Online meetings (Windows preview)
+## Online meetings (Windows and macOS preview)
 
 Open **Meetings**, select the speakers/headphones used by your call, then click
 **Start meeting**. Bolo captures computer audio and your selected microphone,
@@ -260,5 +260,5 @@ credits. Sessions stop after 60 minutes. Saved meetings persist until deleted,
 independently of dictation History. Export text or open the saved WAV recordings
 from Meetings. Closing the window keeps recording; use Stop meeting.
 
-This is a Windows preview requiring a real meeting test before office rollout.
+This is a Windows and macOS preview requiring a real meeting test before office rollout.
 See [implementation, research and limitations](docs/meetings.md).
