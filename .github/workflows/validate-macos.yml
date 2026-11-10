@@ -45,6 +45,8 @@ jobs:
           APP=src-tauri/target/release/bundle/macos/Bolo.app
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -dv --verbose=4 "$APP" 2>&1
+          codesign -d --entitlements :- "$APP" > .scratch/entitlements.plist
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' .scratch/entitlements.plist | grep -qx true
           otool -L "$APP/Contents/MacOS/bolo"
           "$APP/Contents/MacOS/bolo" --check-runtime
           ditto -c -k --sequesterRsrc --keepParent "$APP" Bolo-${{ matrix.target }}.zip

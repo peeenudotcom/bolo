@@ -1,3 +1,6 @@
 {
-  "bundle": {"resources": {"../licenses/": "licenses/"}}
+  "bundle": {
+    "resources": {"../licenses/": "licenses/"},
+    "macOS": {"entitlements": "Entitlements.plist"}
+  }
 }
