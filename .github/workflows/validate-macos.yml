@@ -43,7 +43,9 @@ jobs:
           curl -fL --retry 3 'https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a69/model.int8.onnx' -o .scratch/meeting-models/segmentation.onnx
           curl -fL --retry 3 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx' -o .scratch/meeting-models/embedding.onnx
           cargo test --release --lib --manifest-path src-tauri/Cargo.toml local_speaker_models_load_and_process_speech -- --ignored
-      - run: npm run tauri build -- --bundles app
+      # Validation builds don't publish updates, so skip update signing (the
+      # signing key is only used by the Release workflow).
+      - run: npm run tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Verify signed bundle and native runtime
         run: |
           APP=src-tauri/target/release/bundle/macos/Bolo.app
