@@ -72,6 +72,11 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs update packages; tauri-action then publishes latest.json so
+          # installed copies can update themselves. The key lives in the repo
+          # secret TAURI_SIGNING_PRIVATE_KEY (local copy: ~/.tauri/bolo-updater.key).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Bolo ${{ github.ref_name }}

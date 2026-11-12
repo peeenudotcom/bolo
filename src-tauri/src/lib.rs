@@ -700,6 +700,26 @@ async fn check_update(app: AppHandle) -> Result<UpdateInfo, String> {
     Ok(UpdateInfo { current, latest, available, url: "https://github.com/peeenudotcom/bolo/releases/latest".into() })
 }
 
+/// One-click update: downloads the signed release for this computer,
+/// verifies it against the public key built into Bolo, installs and restarts.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    if app.state::<meetings::State>().active.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return Err("Stop the meeting and wait for it to save before updating.".into());
+    }
+    if !matches!(*app.state::<AppState>().phase.lock().unwrap_or_else(|e| e.into_inner()), Phase::Idle) {
+        return Err("Finish the current dictation before updating.".into());
+    }
+    let update = app.updater().map_err(|e| e.to_string())?
+        .check().await.map_err(|e| format!("Could not check for updates: {e}"))?
+        .ok_or("Bolo is already up to date.")?;
+    status(&app, "processing", Some(format!("Downloading Bolo {}…", update.version)));
+    update.download_and_install(|_, _| {}, || {}).await
+        .map_err(|e| format!("Update failed; your current version still works. {e}"))?;
+    app.restart();
+}
+
 // ---------- windows and tray ----------
 
 fn show_main(app: &AppHandle) {
@@ -743,6 +763,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
             budget::init(handle.path().app_config_dir()?.join("budget.json"));
@@ -851,7 +872,7 @@ pub fn run() {
             download_model,
             delete_model,
             get_history, save_review, history_audio
-            ,cancel_processing, retry_dictation, delete_history, list_microphones, microphone_test, check_update, teach_correction
+            ,cancel_processing, retry_dictation, delete_history, list_microphones, microphone_test, check_update, install_update, teach_correction
         ])
         .build(tauri::generate_context!())
         .map(|app| app.run(|handle, event| {

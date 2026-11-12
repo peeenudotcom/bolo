@@ -1,6 +1,6 @@
 [package]
 name = "bolo"
-version = "0.1.9"
+version = "2.0.0"
 description = "Free voice dictation"
 authors = ["peeenudotcom"]
 edition = "2024"
@@ -44,6 +44,7 @@ base64 = "0.22"
 sha2 = "0.11"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 tauri-plugin-notification = "2.8.1"
+tauri-plugin-updater = "2.14.1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Bolo",
-  "version": "0.1.9",
+  "version": "2.0.0",
   "identifier": "com.peeenudotcom.bolo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -61,6 +61,18 @@
     "macOS": {
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxQzkyOUU0QUUyMEZDRTgKUldUby9DQ3U1Q25KSVdlU25STVhXMmlOMXJOTWd3aVFpeVh1ZFdqOERjaFJyQUlvYUIvbzJhUWkK",
+      "endpoints": [
+        "https://github.com/peeenudotcom/bolo/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

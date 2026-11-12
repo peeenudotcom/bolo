@@ -520,7 +520,17 @@ async function checkForUpdates() {
   try {
     const result=await invoke<{current:string;latest:string;available:boolean;url:string}>("check_update");
     $("#update-result").textContent=result.available ? 'Update '+result.latest+' is available. ' : 'Installed: '+result.current+'. Latest published: '+result.latest+'. No newer release.';
-    if(result.available) { const link=document.createElement("button"); link.className="btn"; link.textContent="Open release"; link.addEventListener("click",()=>void openUrl(result.url)); $("#update-result").append(link); }
+    if(result.available) {
+      const install=document.createElement("button"); install.className="btn primary"; install.textContent="Install update and restart";
+      install.addEventListener("click",async()=>{
+        install.disabled=true; install.textContent="Downloading…";
+        try { await invoke("install_update"); }
+        catch(e) { $("#update-result").textContent=String(e)+" "; $("#update-result").append(link); }
+      });
+      // Fallback for releases published before automatic updates existed.
+      const link=document.createElement("button"); link.className="btn link"; link.textContent="Open release page"; link.addEventListener("click",()=>void openUrl(result.url));
+      $("#update-result").append(install, link);
+    }
   } catch { $("#update-result").textContent="Could not check updates. Try again when you are online."; }
   finally { button.disabled=false; }
 }
