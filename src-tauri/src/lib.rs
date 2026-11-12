@@ -1,5 +1,6 @@
 mod meeting_speakers;
 mod meetings;
+mod meeting_detect;
 mod meeting_notes;
 mod meeting_recovery;
 mod meeting_audio;
@@ -741,6 +742,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             budget::init(handle.path().app_config_dir()?.join("budget.json"));
@@ -775,6 +777,7 @@ pub fn run() {
             // Keyboard hook → actions, handled on their own thread so the
             // hook callback itself stays instant.
             let (tx, rx) = std::sync::mpsc::channel::<Action>();
+            meeting_detect::start(handle.clone());
             let dispatch = handle.clone();
             std::thread::spawn(move || {
                 for action in rx {
@@ -838,7 +841,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meeting_recovery::meeting_recovery_quote, meeting_recovery::meeting_recover, meeting_recovery::meeting_recovery_cancel, meeting_notes::meeting_notes_get, meeting_notes::meeting_notes_generate, meetings::meeting_label_speaker, meetings::meeting_get, meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
+            meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meeting_recovery::meeting_recovery_quote, meeting_recovery::meeting_recover, meeting_recovery::meeting_recovery_cancel, meeting_notes::meeting_notes_get, meeting_notes::meeting_notes_generate, meetings::meeting_label_speaker, meetings::meeting_get, meetings::meeting_search_all,meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
             get_settings, get_status,
             save_settings,
             platform,

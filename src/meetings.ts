@@ -148,4 +148,51 @@ el("meeting-recovery-start").onclick=async()=>{
 el("meeting-recovery-cancel").onclick=async()=>{if(recoveryRunning!==null){await invoke("meeting_recovery_cancel",{id:recoveryRunning});el("meeting-recovery-status").textContent="Stopping after the current request; completed work will be saved.";}};
 listen<{id:number;remaining_seconds:number}>("bolo://recovery",e=>{if(recoveryRunning===e.payload.id)el("meeting-recovery-status").textContent=`Recovering audio… ${Math.ceil(e.payload.remaining_seconds/60)} audio minutes remaining.`;});
 
+// ---------- "meeting detected" reminder ----------
+listen<{app:string}>("bolo://meeting-detected",e=>{
+  if(current)return;
+  el("meeting-detected-text").textContent=`${e.payload.app} is using your microphone. Record and transcribe this meeting?`;
+  el("meeting-detected").hidden=false;
+});
+el("meeting-detected-dismiss").onclick=()=>{el("meeting-detected").hidden=true;};
+el("meeting-detected-start").onclick=()=>{
+  el("meeting-detected").hidden=true;
+  document.querySelector<HTMLButtonElement>('[data-tab="meetings"]')?.click();
+  el<HTMLSelectElement>("meeting-mode").value="meeting";controls();
+  if(!el<HTMLButtonElement>("meeting-start").disabled)el("meeting-start").click();
+};
+
+// ---------- search all saved meetings (local, free) ----------
+type Hit={id:number;title:string;turn_id:string;start_ms:number;speaker:string;text:string};
+let searchTimer:number|undefined;let searchVersion=0;
+function focusTurn(turnId:string){
+  el<HTMLInputElement>("meeting-search").value="";render(selected);
+  const node=el("meeting-transcript").querySelector<HTMLElement>(`li[data-id="${CSS.escape(turnId)}"]`);
+  if(node){node.tabIndex=-1;node.focus();node.scrollIntoView({block:"center"});}
+}
+el("meeting-search-all").oninput=()=>{
+  window.clearTimeout(searchTimer);
+  searchTimer=window.setTimeout(async()=>{
+    const query=el<HTMLInputElement>("meeting-search-all").value;const version=++searchVersion;
+    const results=el("meeting-search-all-results");const status=el("meeting-search-all-status");
+    if(query.trim().length<2){results.replaceChildren();status.textContent="";return;}
+    try{
+      const hits=await invoke<Hit[]>("meeting_search_all",{query});if(version!==searchVersion)return;
+      status.textContent=hits.length?`${hits.length}${hits.length>=100?"+":""} matching captions`:"No saved meeting mentions that.";
+      results.replaceChildren(...hits.map(hit=>{
+        const li=document.createElement("li");const open=document.createElement("button");open.className="btn search-hit";
+        const meta=document.createElement("small");meta.textContent=`${hit.title||"Meeting"} · ${new Date(hit.id).toLocaleDateString()} · ${time(hit.start_ms)} · ${hit.speaker}`;
+        const text=document.createElement("span");text.textContent=hit.text;
+        open.append(meta,text);
+        open.onclick=async()=>{
+          const v=++selectionVersion;
+          try{const saved=await invoke<Meeting>("meeting_get",{id:hit.id});if(v!==selectionVersion)return;selected=saved;render(saved);focusTurn(hit.turn_id);}
+          catch(e){el("meeting-error").textContent=String(e);}
+        };
+        li.append(open);return li;
+      }));
+    }catch(e){status.textContent=String(e);}
+  },250);
+};
+
 el("meeting-copy-text").onclick=async()=>{if(selected)try{await navigator.clipboard.writeText(matchingTurns(selected.turns,"").filter(t=>t.complete).map(t=>t.text).join("\n\n"));el("meeting-meta").textContent="Final text copied. Live drafts are excluded.";}catch(e){el("meeting-error").textContent=String(e);}};

@@ -19,6 +19,7 @@
 #meeting-transcript small{color:var(--muted)}
 #meeting-transcript p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;margin:6px 0}
 #meeting-transcript .partial p{color:var(--muted)}
+.search-hits{list-style:none;padding:0;max-height:360px;overflow-y:auto}.search-hits li{margin-block:6px}.search-hit{display:flex;flex-direction:column;align-items:flex-start;gap:4px;width:100%;white-space:normal;text-align:left;overflow-wrap:anywhere}.search-hit small{color:var(--muted)}
 #meeting-list{list-style:none;padding:0}#meeting-list li{display:flex;align-items:center;gap:8px;margin-block:12px}#meeting-list .btn{white-space:normal;text-align:left}
 #meeting-error{color:var(--danger);white-space:pre-wrap}#meeting-error:empty{display:none}
 @media(max-width:540px){.tabs{flex-wrap:wrap}.tabs button{flex-basis:28%}}

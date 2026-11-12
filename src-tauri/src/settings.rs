@@ -37,6 +37,8 @@ pub struct Settings {
     pub save_audio: bool,
     pub context_enabled: bool,
     pub check_updates: bool,
+    /// Windows: notify when a meeting app starts using the microphone.
+    pub meeting_reminders: bool,
     pub corrections: String,
     pub chat_style: String,
     pub email_style: String,
@@ -82,6 +84,7 @@ impl Default for Settings {
             save_audio: false,
             context_enabled: false,
             check_updates: false,
+            meeting_reminders: true,
             corrections: String::new(),
             chat_style: "casual".into(),
             email_style: "formal".into(),

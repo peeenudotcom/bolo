@@ -227,6 +227,35 @@ pub fn meeting_get(app:AppHandle,id:u64)->Result<Document,String> {
 }
 
 
+#[derive(Serialize)]
+pub struct Hit { pub id:u64, pub title:String, pub turn_id:String, pub start_ms:u64, pub speaker:String, pub text:String }
+
+/// Plain word search across every saved meeting (final captions only).
+/// Local and free: no audio or text leaves the computer.
+#[tauri::command]
+pub fn meeting_search_all(app:AppHandle,query:String)->Result<Vec<Hit>,String> {
+    let query=query.trim().to_lowercase();
+    if query.chars().count()<2 {return Ok(vec![]);}
+    let state=app.state::<State>();
+    if !state.root.exists() {return Ok(vec![]);}
+    let mut ids:Vec<u64>=std::fs::read_dir(&state.root).map_err(|e|e.to_string())?
+        .filter_map(|e|e.ok()?.file_name().to_string_lossy().parse().ok()).collect();
+    ids.sort_unstable_by(|a,b|b.cmp(a));
+    let mut hits=vec![];
+    for id in ids {
+        let Ok(d)=meeting_get(app.clone(),id) else {continue};
+        for t in d.turns.iter().filter(|t|t.complete) {
+            let speaker=label(&d,t).cloned().unwrap_or_else(||t.speaker.as_ref().map(|s|format!("Speaker {s}")).unwrap_or_else(||if t.source=="computer"{"Meeting audio".into()}else{"Microphone".into()}));
+            if t.text.to_lowercase().contains(&query) || speaker.to_lowercase().contains(&query) {
+                let text:String=t.text.chars().take(240).collect();
+                hits.push(Hit {id,title:d.title.clone(),turn_id:t.id.clone(),start_ms:t.start_ms,speaker,text});
+                if hits.len()>=100 {return Ok(hits);}
+            }
+        }
+    }
+    Ok(hits)
+}
+
 pub fn label<'a>(d:&'a Document,t:&Turn)->Option<&'a String> {
     d.speaker_labels.get(&format!("turn:{}",t.id)).or_else(||d.speaker_labels.get(&t.speaker.as_ref().map(|s|format!("speaker:{s}")).unwrap_or_else(||format!("source:{}",t.source))))
 }
