@@ -510,6 +510,12 @@ fn restart_app(app: AppHandle) -> Result<(), String> {
     if app.state::<meetings::State>().active.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         return Err("Stop the meeting and wait for it to save before restarting Bolo.".into());
     }
+    // Restarting mid-dictation would drop the paste and skip putting the
+    // user's clipboard back. Recovery pastes run outside `phase`, so also
+    // check the clipboard lock.
+    if !matches!(*app.state::<AppState>().phase.lock().unwrap_or_else(|e| e.into_inner()), Phase::Idle) || paste::busy() {
+        return Err("Wait for the current dictation to finish before restarting Bolo.".into());
+    }
     app.restart()
 }
 
@@ -853,6 +859,9 @@ pub fn run() {
             if let Err(e) = hotkey::start(tx) {
                 eprintln!("keyboard hook: {e}");
                 KEYBOARD_HOOK_FAILED.store(true, Ordering::SeqCst);
+                // On macOS the Accessibility banner explains this; a second,
+                // differently worded error at the top only confused people.
+                #[cfg(not(target_os = "macos"))]
                 status(&handle, "error", Some(e));
             }
             if let Err(e) = apply_hotkey(&handle, &hotkey_str) {

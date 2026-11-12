@@ -60,8 +60,11 @@ fn send_shortcut(app: &tauri::AppHandle, letter: char) -> Result<()> {
         Ok(result) => result,
         Err(_) if state.compare_exchange(PENDING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_ok() =>
             Err(anyhow!("Bolo was busy and could not paste. Your text is safe in History.")),
-        // The keystroke already started on the main thread; it finishes quickly.
-        Err(_) => rx.recv().map_err(|_| anyhow!("keyboard: paste was interrupted"))?,
+        // The keystroke already started on the main thread and normally ends
+        // within milliseconds. Never wait forever: this thread holds the
+        // clipboard lock, and a hang would block every later dictation.
+        Err(_) => rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|_| anyhow!("Pasting got stuck. Your text is safe in History."))?,
     }
 }
 
@@ -134,6 +137,9 @@ fn sequence() -> Option<String> { arboard::Clipboard::new().ok().and_then(|mut c
 
 
 static CLIPBOARD_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// True while a paste or copy is using the clipboard.
+pub fn busy() -> bool { CLIPBOARD_OPERATION.try_lock().is_err() }
 
 #[cfg(windows)]
 struct Backup { formats: Vec<(u32, Vec<u8>)>, captured_sequence: u32 }
