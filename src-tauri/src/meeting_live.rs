@@ -41,9 +41,12 @@ struct Events { pending:VecDeque<(u64,u64)>, ranges:HashMap<String,(u64,u64)>, c
 impl Events {
     fn apply(&mut self,event:&Value,current:(u64,u64),source:&str,turns:&mut Vec<Turn>)->Result<bool> {
         let kind=event["type"].as_str().unwrap_or("");
-        if matches!(kind,"error"|"conversation.item.input_audio_transcription.failed") {bail!("OpenAI could not transcribe part of this meeting. Saved audio and earlier text have been kept.");}
+        if kind=="error" {bail!("OpenAI could not transcribe part of this meeting. Saved audio and earlier text have been kept.");}
         let id=event["item_id"].as_str().unwrap_or("");
         if id.is_empty(){return Ok(false);}
+        // One unreadable phrase shouldn't end captions: count it as done
+        // (so Stop doesn't wait for it) and carry on. The audio is in the WAV.
+        if kind=="conversation.item.input_audio_transcription.failed" {self.completed.insert(id.into());return Ok(false);}
         if kind=="input_audio_buffer.committed" {
             let range=self.pending.pop_front().context("Unexpected meeting turn acknowledgement")?;
             self.ranges.insert(id.into(),range);
@@ -70,6 +73,10 @@ pub async fn transcribe(app:&AppHandle,c:Arc<Control>,source:&str,mut socket:Soc
     let mut events=Events::default(); let mut detector=earshot::Detector::default();
     let mut preroll=VecDeque::<Packet>::new();let mut active=false;let mut start=0;let mut end=0;let mut last_voice=0;
     let mut closing=None;let mut expected=0usize;
+    // Budget is reserved about a minute ahead and spent from memory. Writing
+    // the budget file for every 200 ms packet (10×/s for two streams) meant a
+    // momentary antivirus lock on the file could end captions.
+    let mut prepaid=0u64;
     let mut tick=tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
@@ -92,18 +99,20 @@ pub async fn transcribe(app:&AppHandle,c:Arc<Control>,source:&str,mut socket:Soc
                             let pcm=crate::audio::resample(&packet.samples,16000,24000);
                             let amount=cost(pcm.len());
                             // Reserve durably before sending any audio. Failed sends keep their charge.
-                            crate::budget::reserve(amount)?;
-                            c.update(app,|d|d.estimated_micros=d.estimated_micros.saturating_add(amount));
+                            if prepaid<amount {let block=amount.max(cost(24000*60));crate::budget::reserve(block)?;prepaid+=block;}
+                            prepaid-=amount;
+                            c.update_live(app,|d|d.estimated_micros=d.estimated_micros.saturating_add(amount));
                             let bytes:Vec<u8>=pcm.iter().flat_map(|s|((s.clamp(-1.0,1.0)*32767.0) as i16).to_le_bytes()).collect();
                             send(&mut socket,json!({"type":"input_audio_buffer.append","audio":base64::engine::general_purpose::STANDARD.encode(bytes)})).await?;
                         }
-                        if end.saturating_sub(last_voice)>=800 || end.saturating_sub(start)>=15000 {
+                        // Never commit less than 100 ms: OpenAI rejects near-empty commits.
+                        if end.saturating_sub(start)>=100 && (end.saturating_sub(last_voice)>=800 || end.saturating_sub(start)>=15000) {
                             events.pending.push_back((start,end));expected+=1;
                             send(&mut socket,json!({"type":"input_audio_buffer.commit"})).await?;active=false;
                         }
                     },
                     None=>{
-                        if active {events.pending.push_back((start,end));expected+=1;send(&mut socket,json!({"type":"input_audio_buffer.commit"})).await?;}
+                        if active && end.saturating_sub(start)>=100 {events.pending.push_back((start,end));expected+=1;send(&mut socket,json!({"type":"input_audio_buffer.commit"})).await?;}
                         closing=Some(tokio::time::Instant::now());
                     }
                 }
@@ -112,8 +121,12 @@ pub async fn transcribe(app:&AppHandle,c:Arc<Control>,source:&str,mut socket:Soc
                 match message {
                     Some(Ok(Message::Text(text)))=>{
                         let event:Value=serde_json::from_str(&text).context("Invalid live transcription response")?;
+                        // A commit that turned out empty is harmless: forget it and continue.
+                        if event["type"]=="error" && event["error"]["code"]=="input_audio_buffer_commit_empty" {
+                            events.pending.pop_back();expected=expected.saturating_sub(1);continue;
+                        }
                         let final_event={let mut d=c.document.lock().unwrap_or_else(|e|e.into_inner());events.apply(&event,(start,end),source,&mut d.turns)?};
-                        c.update(app, |_|{});
+                        c.update_live(app, |_|{});
                         if final_event {crate::meetings::persist(app,&c)?;}
                     },
                     Some(Ok(Message::Ping(data)))=>{socket.send(Message::Pong(data)).await.map_err(|_|anyhow::anyhow!("Meeting connection closed"))?;},
@@ -147,6 +160,13 @@ pub async fn transcribe(app:&AppHandle,c:Arc<Control>,source:&str,mut socket:Soc
         assert_eq!(turns[0].start_ms,1000);assert_eq!(turns[1].start_ms,100);
         e.apply(&json!({"type":"conversation.item.input_audio_transcription.delta","item_id":"a","delta":"duplicate"}),(0,0),"computer",&mut turns).unwrap();
         assert_eq!(turns[1].text,"first");assert!(turns.iter().all(|t|t.speaker.is_none()));
+    }
+    #[test] fn one_failed_phrase_does_not_end_captions() {
+        let mut e=Events::default();let mut turns=vec![];
+        assert!(!e.apply(&json!({"type":"conversation.item.input_audio_transcription.failed","item_id":"x"}),(0,0),"computer",&mut turns).unwrap());
+        assert!(e.completed.contains("x"));
+        e.apply(&json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"y","transcript":"still here"}),(0,0),"computer",&mut turns).unwrap();
+        assert_eq!(turns[0].text,"still here");
     }
     #[test] fn final_replaces_partial_and_error_is_visible() {
         let mut e=Events::default();let mut turns=vec![];

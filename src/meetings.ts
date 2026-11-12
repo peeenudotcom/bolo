@@ -42,9 +42,12 @@ function render(doc:Meeting|null) {
   const turns=matchingTurns(doc?.turns??[],query,doc??undefined);
   el("meeting-search-result").textContent=query.trim()?`${turns.length} matching turns. Export includes the full transcript.`:"";
   const ids=new Set(turns.map(t=>t.id));
-  for(const node of Array.from(list.children)) if(!ids.has((node as HTMLElement).dataset.id!))node.remove();
+  // Index existing rows once: searching the list for every turn was O(n²)
+  // and made hour-long meetings lag.
+  const rows=new Map<string,HTMLElement>();
+  for(const node of Array.from(list.children) as HTMLElement[]) {if(!ids.has(node.dataset.id!))node.remove();else rows.set(node.dataset.id!,node);}
   for(const [index,turn] of turns.entries()) {
-    let node=Array.from(list.children).find(n=>(n as HTMLElement).dataset.id===turn.id) as HTMLElement|undefined;
+    let node=rows.get(turn.id);
     if(!node){node=document.createElement("li");node.dataset.id=turn.id;node.append(document.createElement("small"),document.createElement("p"));const edit=document.createElement("button");edit.className="btn link";edit.textContent="Correct this speaker";edit.onclick=()=>{labels.add(new Option("Selected caption only",`turn:${turn.id}`));labels.value=`turn:${turn.id}`;el<HTMLInputElement>("meeting-speaker-name").focus();};node.append(edit);}
     node.classList.toggle("partial",!turn.complete);
     node.querySelector("small")!.textContent=`${time(turn.start_ms)} · ${speaker(turn,doc??undefined)}${turn.complete?"":" · Live draft"}`;

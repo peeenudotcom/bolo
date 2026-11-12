@@ -164,8 +164,12 @@ fn on_custom_shortcut(app: &AppHandle, pressed: bool) {
             _ => None,
         }
     };
+    // Hand off to the dispatch thread: this runs on the window's event loop,
+    // and starting a slow Bluetooth microphone could freeze Bolo for seconds.
     if let Some(a) = action {
-        act(app, a);
+        if !hotkey::dispatch(a) {
+            act(app, a);
+        }
     }
 }
 
@@ -846,7 +850,18 @@ pub fn run() {
             get_history, save_review, history_audio
             ,cancel_processing, retry_dictation, delete_history, list_microphones, microphone_test, check_update, teach_correction
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!())
+        .map(|app| app.run(|handle, event| {
+            // Cmd+Q (macOS), the Dock and system shutdown prompts all arrive
+            // here, not through the tray menu: never quit mid-meeting.
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if handle.state::<meetings::State>().active.lock().unwrap_or_else(|e|e.into_inner()).is_some() {
+                    api.prevent_exit();
+                    show_main(handle);
+                    status(handle,"error",Some("Stop the meeting and wait for it to save before quitting Bolo.".into()));
+                }
+            }
+        }));
     if let Err(error) = result {
         eprintln!("Bolo could not start: {error}");
         // If setup itself fails there is no pill yet. Show an ordinary Windows

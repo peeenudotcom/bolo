@@ -52,7 +52,7 @@ pub fn analyze(models:&Path,audio:&Path)->Result<Vec<Segment>> {
     use sherpa_onnx::*;
     ensure!(MODELS.iter().all(|(name,_,size,hash)|valid(&models.join(name),*size,hash)),"Download the speaker-label models first (41 MB). Captions remain available.");
     let mut wav=hound::WavReader::open(audio)?;
-    ensure!(wav.spec().sample_rate==16000 && wav.spec().channels==1 && wav.duration()<=16000*60*60+16000,"Unsupported or oversized meeting recording");
+    ensure!(wav.spec().sample_rate==16000 && wav.spec().channels==1 && wav.duration()<=16000*61*60,"Unsupported or oversized meeting recording");
     let samples:Vec<f32>=wav.samples::<i16>().map(|s|s.map(|s|s as f32/32768.0)).collect::<std::result::Result<_,_>>()?;
     if samples.len()<1600 || !samples.iter().any(|v|v.abs()>0.001){return Ok(vec![]);}
     let config=OfflineSpeakerDiarizationConfig {

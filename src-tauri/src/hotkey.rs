@@ -329,6 +329,11 @@ fn handle(k: K, down: bool) -> Feedback {
 }
 
 /// Installs the keyboard hook on its own thread. Actions arrive on `tx`.
+/// Queue an action for the dispatch thread. Returns false before start().
+pub fn dispatch(action: Action) -> bool {
+    TX.get().is_some_and(|tx| tx.send(action).is_ok())
+}
+
 pub fn start(tx: mpsc::Sender<Action>) -> Result<(), String> {
     TX.set(tx).map_err(|_| "hotkey already started".to_string())?;
     backend_start()
@@ -473,11 +478,22 @@ mod win {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::{handle, K};
-    use core_foundation::runloop::CFRunLoop;
+    use core_foundation::base::TCFType;
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
     use core_graphics::event::{
         CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
         CallbackResult, EventField,
     };
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    // macOS switches an event tap off if it is ever slow to respond (or on
+    // some secure-input transitions). Without re-enabling it, the Fn shortcut
+    // silently stopped working until Bolo was restarted.
+    static TAP: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+    }
 
     // Device-dependent modifier bits, which tell left and right apart.
     fn flag_bit(keycode: i64) -> Option<(K, u64)> {
@@ -500,12 +516,19 @@ mod mac {
         std::thread::Builder::new()
             .name("bolo-event-tap".into())
             .spawn(move || {
-                let result = CGEventTap::with_enabled(
+                let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
                     CGEventTapPlacement::HeadInsertEventTap,
                     CGEventTapOptions::Default,
                     vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
                     |_proxy, etype, event| {
+                        if matches!(etype, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
+                            let tap = TAP.load(Ordering::Acquire);
+                            if !tap.is_null() {
+                                unsafe { CGEventTapEnable(tap as core_foundation::mach_port::CFMachPortRef, true) };
+                            }
+                            return CallbackResult::Keep;
+                        }
                         let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                         let fb = match etype {
                             CGEventType::FlagsChanged => match flag_bit(code) {
@@ -527,14 +550,22 @@ mod mac {
                         };
                         if fb.suppress { CallbackResult::Drop } else { CallbackResult::Keep }
                     },
-                    || {
-                        let _ = ready_tx.send(true);
-                        CFRunLoop::run_current();
-                    },
                 );
-                if result.is_err() {
+                let Ok(tap) = tap else {
                     let _ = ready_tx.send(false);
-                }
+                    return;
+                };
+                let Ok(source) = tap.mach_port().create_runloop_source(0) else {
+                    let _ = ready_tx.send(false);
+                    return;
+                };
+                TAP.store(tap.mach_port().as_concrete_TypeRef() as *mut std::ffi::c_void, Ordering::Release);
+                CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
+                tap.enable();
+                let _ = ready_tx.send(true);
+                CFRunLoop::run_current();
+                TAP.store(std::ptr::null_mut(), Ordering::Release);
+                drop(tap);
             })
             .map_err(|e| e.to_string())?;
         match ready_rx.recv() {

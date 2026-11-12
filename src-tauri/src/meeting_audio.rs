@@ -7,6 +7,24 @@ use tokio::sync::mpsc as async_channel;
 pub struct Packet { pub start_ms: u64, pub samples: Vec<f32> }
 struct Raw { at: u64, rate: u32, samples: Vec<f32> }
 
+/// Things the recorder tells the meeting screen without stopping.
+#[derive(Default)]
+pub struct Notices { pub caption_gap: AtomicBool, pub device_switched: AtomicBool }
+
+/// Live captions are best-effort: if they can't keep up (network stall) or
+/// have stopped, drop the packet for captions but never stop recording.
+fn offer(tx:&async_channel::Sender<Packet>,packet:Packet,notices:&Notices) {
+    if let Err(async_channel::error::TrySendError::Full(_))=tx.try_send(packet) {
+        notices.caption_gap.store(true,Ordering::Release);
+    }
+}
+
+fn default_device_name(output:bool)->Option<String> {
+    let host=cpal::default_host();
+    let device=if output {host.default_output_device()} else {host.default_input_device()}?;
+    device.description().ok().map(|d|d.name().to_owned())
+}
+
 pub fn outputs() -> Result<Vec<String>> {
     ensure!(cfg!(any(windows, target_os="macos")), "Online meeting capture requires Windows or macOS.");
     #[cfg(target_os="macos")]
@@ -17,9 +35,17 @@ pub fn outputs() -> Result<Vec<String>> {
 
 /// Owns the non-Send stream on this worker. The caller joins this worker at stop.
 pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
-    stop: Arc<AtomicBool>, ready: mpsc::Sender<Result<()>>, tx: async_channel::Sender<Packet>) -> Result<()> {
+    stop: Arc<AtomicBool>, ready: mpsc::Sender<Result<()>>, tx: async_channel::Sender<Packet>, notices: Arc<Notices>) -> Result<()> {
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Raw>(128);
     let failed = Arc::new(AtomicBool::new(false));
+    // With no device picked, follow Windows' default device: plugging in
+    // headphones mid-meeting used to record silence for the other side, and
+    // unplugging a device ended the recording. (macOS system audio is
+    // captured separately and doesn't depend on the output device.)
+    let follow_default = name.is_empty() && !(cfg!(target_os="macos") && output);
+    let mut current_default = if follow_default { default_device_name(output) } else { None };
+    let mut checked = Instant::now();
+    let reopen_tx = raw_tx.clone();
     let setup = (|| -> Result<_> {
         ensure!(cfg!(any(windows, target_os="macos")), "Online meeting capture requires Windows or macOS.");
         let capture = start_capture(output, name, epoch, raw_tx, failed.clone())?;
@@ -27,13 +53,26 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
             bits_per_sample:16, sample_format:hound::SampleFormat::Int })?;
         Ok((capture,writer))
     })();
-    let (stream, mut writer) = match setup { Ok(value) => { let _=ready.send(Ok(())); value }, Err(e) => {
+    let (mut stream, mut writer) = match setup { Ok(value) => { let _=ready.send(Ok(())); value }, Err(e) => {
         let _=ready.send(Err(anyhow::anyhow!(e.to_string()))); return Err(e);
     }};
     let mut written=0u64; let mut buffer=Vec::new(); let mut buffer_start=0;
     let mut flush=Instant::now();
     let result=(|| -> Result<()> {
         while !stop.load(Ordering::Acquire) {
+            let device_changed = follow_default && checked.elapsed() >= Duration::from_secs(2) && {
+                checked = Instant::now();
+                let now = default_device_name(output);
+                now.is_some() && now != current_default
+            };
+            if follow_default && (device_changed || failed.load(Ordering::Acquire)) {
+                let _ = stream.stop();
+                failed.store(false, Ordering::Release);
+                stream = start_capture(output, String::new(), epoch, reopen_tx.clone(), failed.clone())
+                    .context("The audio device disconnected and no other device was available. Recording stopped; saved audio remains available.")?;
+                current_default = default_device_name(output);
+                notices.device_switched.store(true, Ordering::Release);
+            }
             ensure!(!failed.load(Ordering::Acquire), "Meeting audio disconnected or capture fell behind. Recording stopped; saved audio remains available.");
             match raw_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(raw) => {
@@ -44,8 +83,7 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
                     // Preserve those gaps in the recording, rather than collapsing time.
                     if desired > written+1600 {
                         if !buffer.is_empty() {
-                            tx.try_send(Packet {start_ms:buffer_start,samples:std::mem::take(&mut buffer)})
-                                .map_err(|_| anyhow::anyhow!("Live transcription fell behind. Meeting stopped to avoid losing audio."))?;
+                            offer(&tx, Packet {start_ms:buffer_start,samples:std::mem::take(&mut buffer)}, &notices);
                         }
                         for _ in written..desired { writer.write_sample(0i16)?; }
                         written=desired;
@@ -54,8 +92,7 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
                     for s in &samples { writer.write_sample((s.clamp(-1.0,1.0)*32767.0) as i16)?; }
                     written+=samples.len() as u64; buffer.extend(samples);
                     if buffer.len()>=3200 {
-                        tx.try_send(Packet { start_ms:buffer_start,samples:std::mem::take(&mut buffer) })
-                            .map_err(|_| anyhow::anyhow!("Live transcription fell behind. Meeting stopped to avoid losing audio."))?;
+                        offer(&tx, Packet { start_ms:buffer_start,samples:std::mem::take(&mut buffer) }, &notices);
                     }
                 },
                 Err(mpsc::RecvTimeoutError::Timeout)=>{},
@@ -74,9 +111,9 @@ pub fn record(output: bool, name: String, path: PathBuf, epoch: Instant,
         for s in &samples { writer.write_sample((s.clamp(-1.0,1.0)*32767.0) as i16)?; }
         written+=samples.len() as u64; buffer.extend(samples);
     }
-    let tail = if !buffer.is_empty() { tx.try_send(Packet {start_ms:buffer_start,samples:buffer}).map_err(|_|anyhow::anyhow!("Final audio could not reach live transcription. The recording has been saved.")) } else {Ok(())};
+    if !buffer.is_empty() { offer(&tx, Packet {start_ms:buffer_start,samples:buffer}, &notices); }
     writer.finalize().context("Could not finish saving meeting audio")?;
-    result?; stopped?; tail
+    result?; stopped
 }
 
 fn stream<T>(device:&cpal::Device, config:cpal::StreamConfig, channels:usize, rate:u32,

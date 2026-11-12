@@ -192,6 +192,16 @@ impl Backup {
                 }
                 // Windows synthesizes a bitmap handle from DIB; store the portable DIB.
                 if format == 2 || format == 9 { bitmap = true; continue; }
+                // OLE formats point at the live Office object that copied them.
+                // A byte snapshot restored later breaks pasting in Office and
+                // cancels Excel's copy selection; the plain text/HTML/image
+                // formats saved alongside are what other apps paste anyway.
+                if format >= 0xC000 {
+                    let mut name = [0u16; 64];
+                    let len = GetClipboardFormatNameW(format, &mut name).max(0) as usize;
+                    let name = String::from_utf16_lossy(&name[..len]);
+                    if matches!(name.as_str(), "DataObject" | "Ole Private Data" | "Object Descriptor" | "Link Source Descriptor" | "Embed Source" | "Link Source" | "Embedded Object") { continue; }
+                }
                 anyhow::ensure!(!matches!(format, 3 | 14 | 128 | 130 | 131 | 142 | 0x200..=0x3ff), "This clipboard format cannot be preserved safely. Copy text first or turn off Keep my clipboard.");
                 let data = GetClipboardData(format)?;
                 let mem = HGLOBAL(data.0); let size = GlobalSize(mem);

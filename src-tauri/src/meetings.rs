@@ -8,12 +8,27 @@ use tauri::{AppHandle,Emitter,Manager};
 pub struct Turn { pub id:String, pub source:String, pub start_ms:u64, pub end_ms:u64, pub text:String, pub complete:bool, #[serde(default)] pub speaker:Option<String> }
 #[derive(Clone,Serialize,Deserialize)]
 pub struct Document { pub id:u64, pub title:String, pub status:String, pub error:String, pub elapsed_ms:u64, pub estimated_micros:u64, pub turns:Vec<Turn>, #[serde(default)] pub speakers:Vec<crate::meeting_speakers::Segment>, #[serde(default)] pub speaker_labels:std::collections::BTreeMap<String,String>, #[serde(default)] pub microphone_only:bool, #[serde(default)] pub recovered_from:Option<u64> }
-pub struct Control { pub stop:Arc<AtomicBool>, pub document:Mutex<Document> }
+pub struct Control { pub stop:Arc<AtomicBool>, pub document:Mutex<Document>, last_emit:Mutex<Option<Instant>> }
 pub struct State { pub active:Mutex<Option<Arc<Control>>>, pub root:PathBuf, pub(crate) io:Mutex<()> }
 impl State {pub fn new(root:PathBuf)->Self {Self {active:Mutex::new(None),root,io:Mutex::new(())}}}
 impl Control {
-    fn emit(&self,app:&AppHandle) { let d=self.document.lock().unwrap_or_else(|e|e.into_inner()).clone(); let _=app.emit("bolo://meeting",d); }
+    fn emit(&self,app:&AppHandle) {
+        *self.last_emit.lock().unwrap_or_else(|e|e.into_inner())=Some(Instant::now());
+        let d=self.document.lock().unwrap_or_else(|e|e.into_inner()).clone(); let _=app.emit("bolo://meeting",d);
+    }
+    /// Status changes: always shown immediately.
     pub fn update(&self,app:&AppHandle,f:impl FnOnce(&mut Document)) { f(&mut self.document.lock().unwrap_or_else(|e|e.into_inner())); self.emit(app); }
+    /// Caption deltas, cost and the clock: at most ~3 screen refreshes a second.
+    /// Emitting the whole transcript on every event made long meetings lag.
+    pub fn update_live(&self,app:&AppHandle,f:impl FnOnce(&mut Document)) {
+        f(&mut self.document.lock().unwrap_or_else(|e|e.into_inner()));
+        let due=self.last_emit.lock().unwrap_or_else(|e|e.into_inner()).is_none_or(|at|at.elapsed()>=Duration::from_millis(300));
+        if due {self.emit(app);}
+    }
+    /// Shown once in the meeting's message line; later notes are appended.
+    pub fn note(&self,app:&AppHandle,message:&str) {
+        self.update(app,|d| {if !d.error.contains(message) {if !d.error.is_empty(){d.error.push(' ');} d.error.push_str(message);}});
+    }
 }
 pub(crate) fn save(root:&Path,d:&Document)->Result<()> {
     use std::io::Write;
@@ -85,7 +100,7 @@ pub async fn meeting_start(app:AppHandle,title:String,output:String,microphone_o
         let id=crate::history::now();
         let microphone_only=microphone_only.unwrap_or(false);
         let title=if microphone_only&&title.trim().is_empty(){"Long dictation".into()}else{title};
-        let c=Arc::new(Control {stop:Arc::new(AtomicBool::new(false)), document:Mutex::new(Document {id,title:title.trim().chars().take(100).collect(),status:"connecting".into(),error:String::new(),elapsed_ms:0,estimated_micros:0,turns:vec![],speakers:vec![],speaker_labels:Default::default(),microphone_only,recovered_from:None})});
+        let c=Arc::new(Control {stop:Arc::new(AtomicBool::new(false)), last_emit:Mutex::new(None), document:Mutex::new(Document {id,title:title.trim().chars().take(100).collect(),status:"connecting".into(),error:String::new(),elapsed_ms:0,estimated_micros:0,turns:vec![],speakers:vec![],speaker_labels:Default::default(),microphone_only,recovered_from:None})});
         save(&meetings.root,&c.document.lock().unwrap_or_else(|e|e.into_inner()))?;
         *active=Some(c.clone()); Ok((c,settings))
     })().map_err(|e|e.to_string())?;
@@ -94,7 +109,7 @@ pub async fn meeting_start(app:AppHandle,title:String,output:String,microphone_o
     tauri::async_runtime::spawn(async move {
         let result=run(&app,control.clone(),settings,output).await;
         control.stop.store(true,Ordering::Release);
-        control.update(&app,|d| {d.status=if result.is_ok(){"saved"}else{"failed"}.into();if let Err(e)=result {d.error=e.to_string();}});
+        control.update(&app,|d| {d.status=if result.is_ok(){"saved"}else{"failed"}.into();if let Err(e)=result {d.error=if d.error.is_empty(){e.to_string()}else{format!("{e} {}",d.error)};}});
         if let Err(e)=persist(&app,&control) {control.update(&app,|d| {d.status="failed".into();d.error=e.to_string();});}
         *app.state::<State>().active.lock().unwrap_or_else(|e|e.into_inner())=None;
         let _=app.emit("bolo://meetings-changed",());
@@ -111,11 +126,13 @@ async fn run(app:&AppHandle,c:Arc<Control>,settings:crate::settings::Settings,ou
     let id=c.document.lock().unwrap_or_else(|e|e.into_inner()).id;
     let dir=app.state::<State>().root.join(id.to_string());
     let epoch=Instant::now(); let mut workers=vec![]; let mut tasks=vec![];
+    let notices=Arc::new(crate::meeting_audio::Notices::default());
     for (source,name,socket) in sources {
         let (tx,rx)=tokio::sync::mpsc::channel(40);
         let (ready_tx,ready_rx)=std::sync::mpsc::channel();
         let stop=c.stop.clone(); let path=dir.join(format!("{source}.wav"));
-        let worker=std::thread::spawn(move ||crate::meeting_audio::record(source=="computer",name,path,epoch,stop,ready_tx,tx));
+        let worker_notices=notices.clone();
+        let worker=std::thread::spawn(move ||crate::meeting_audio::record(source=="computer",name,path,epoch,stop,ready_tx,tx,worker_notices));
         workers.push(worker);
         let ready=tauri::async_runtime::spawn_blocking(move||ready_rx.recv_timeout(Duration::from_secs(10))).await?;
         match ready {Ok(Ok(()))=>{}, other=>{
@@ -125,13 +142,29 @@ async fn run(app:&AppHandle,c:Arc<Control>,settings:crate::settings::Settings,ou
             anyhow::bail!("Meeting audio could not start: {}",match other {Ok(Err(e))=>e.to_string(),_=>"Audio device timed out".into()});
         }}
         let app=app.clone();let control=c.clone();
-        tasks.push(tauri::async_runtime::spawn(async move {let r=crate::meeting_live::transcribe(&app,control.clone(),source,socket,rx).await;if r.is_err(){control.stop.store(true,Ordering::Release);}r}));
+        // Captions are best-effort. A network drop, OpenAI error or the budget
+        // running out ends live captions for this source only; the WAV keeps
+        // recording so the rest can be recovered afterwards.
+        tasks.push(tauri::async_runtime::spawn(async move {
+            let r=crate::meeting_live::transcribe(&app,control.clone(),source,socket,rx).await;
+            if let Err(e)=&r {
+                let who=if source=="computer"{"Meeting audio"}else{"Your microphone"};
+                control.note(&app,&format!("{who} live captions stopped ({e}). Recording continues; after stopping, use Recover to transcribe the rest."));
+            }
+            r
+        }));
     }
     c.update(app,|d|d.status="recording".into());
     while !c.stop.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let ms=epoch.elapsed().as_millis() as u64;
-        c.update(app,|d|d.elapsed_ms=ms);
+        c.update_live(app,|d|d.elapsed_ms=ms);
+        if notices.caption_gap.swap(false,Ordering::AcqRel) {
+            c.note(app,"Live captions fell behind and skipped some audio. The recording is complete; use Recover after stopping for a full transcript.");
+        }
+        if notices.device_switched.swap(false,Ordering::AcqRel) {
+            c.note(app,"An audio device changed during the meeting; Bolo switched to the new default device.");
+        }
         if ms>=60*60*1000 {c.stop.store(true,Ordering::Release);}
         if workers.iter().any(|w|w.is_finished()) {c.stop.store(true,Ordering::Release);}
     }
@@ -142,12 +175,16 @@ async fn run(app:&AppHandle,c:Arc<Control>,settings:crate::settings::Settings,ou
             Ok(Ok(Ok(())))=>{},Ok(Ok(Err(e)))=>failure=Some(e),_=>failure=Some(anyhow::anyhow!("Meeting capture worker stopped unexpectedly")),
         }
     }
-    for task in tasks {match task.await {Ok(Ok(()))=>{},Ok(Err(e))=>failure=Some(e),Err(_)=>failure=Some(anyhow::anyhow!("Meeting transcription worker stopped unexpectedly"))}}
-        if let Some(e)=failure {return Err(e);}
+    // Caption errors were already noted while recording; they never fail a
+    // meeting whose audio was saved.
+    for task in tasks {let _=task.await;}
+    if let Some(e)=failure {return Err(e);}
     if !microphone_only && crate::meeting_speakers::meeting_speaker_models(app.clone()) {
         c.update(app,|d|d.status="labelling".into());
-        let app=app.clone();let control=c.clone();
-        tauri::async_runtime::spawn_blocking(move||crate::meeting_speakers::finish(&app,&control)).await??;
+        let app2=app.clone();let control=c.clone();
+        let labelled=tauri::async_runtime::spawn_blocking(move||crate::meeting_speakers::finish(&app2,&control)).await;
+        // Speaker numbers are optional: the transcript and audio are already safe.
+        match labelled {Ok(Ok(()))=>{},Ok(Err(e))=>c.note(app,&format!("Speaker labels could not be added ({e}).")),Err(_)=>c.note(app,"Speaker labels could not be added.")}
     }
     Ok(())
 }
