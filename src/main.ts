@@ -558,10 +558,26 @@ $("#budget-save").addEventListener("click", async () => {
 });
 window.addEventListener("focus", () => { void refreshBudget(); });
 
+// ---------- macOS Accessibility ----------
+// Each new (ad-hoc signed) build loses its Accessibility grant, and without it
+// the shortcut silently does nothing. Say so where the user can act on it.
+async function checkAccessibility() {
+  if (os !== "macos") return;
+  try { $("#accessibility-needed").hidden = !(await invoke<boolean>("accessibility_missing")); } catch { /* keep current state */ }
+}
+$("#accessibility-open").addEventListener("click", async () => {
+  try { await invoke("open_accessibility_settings"); } catch (e) { showStatus(String(e), true); }
+});
+$("#accessibility-restart").addEventListener("click", async () => {
+  try { await invoke("restart_app"); } catch (e) { showStatus(String(e), true); }
+});
+window.addEventListener("focus", () => { void checkAccessibility(); });
+
 // ---------- boot ----------
 (async () => {
   settings = await invoke<Settings>("get_settings");
   os = await invoke<string>("platform");
+  await checkAccessibility();
   await refreshBudget(true);
   const initialStatus = await invoke<{ state: string; message?: string }>("get_status");
   applyActivity(initialStatus);

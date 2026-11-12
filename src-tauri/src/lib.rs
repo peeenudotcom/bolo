@@ -268,10 +268,11 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
         anyhow::ensure!(paste_result && style::still_target(&target), "Command destination changed. Dictation is saved in History.");
         let Some((base, key, model)) = llm_target(&s, true) else { anyhow::bail!("Command mode needs an OpenAI key"); };
         let expected = target.clone();
+        let handle = app.clone();
         let selection = tauri::async_runtime::spawn_blocking(move || {
             hotkey::wait_modifiers_released(Duration::from_secs(2));
             anyhow::ensure!(style::still_target(&expected), "Selection changed");
-            paste::copy_selection(&expected)
+            paste::copy_selection(&handle, &expected)
         }).await??;
         anyhow::ensure!(style::still_target(&target), "Command destination changed. Your dictation is safe in History.");
         status(app, "processing", Some("Editing… Esc to cancel".into()));
@@ -319,10 +320,11 @@ async fn process_samples(app: &AppHandle, samples: Vec<f32>, command: bool, targ
     let typed = to_type.clone();
     let expected = target.clone();
     status(app, "processing", Some("Pasting…".into()));
+    let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         hotkey::wait_modifiers_released(Duration::from_secs(2));
         anyhow::ensure!(!cancel.load(Ordering::SeqCst), "Cancelled");
-        paste::type_text(&to_type, s.restore_clipboard, &expected)
+        paste::type_text(&handle, &to_type, s.restore_clipboard, &expected)
     }).await??;
     hotkey::note_pasted(&typed);
     *state.last_paste.lock().unwrap_or_else(|e| e.into_inner()) = Some((target, Instant::now()));
@@ -467,6 +469,55 @@ fn get_budget() -> Result<budget::View, String> { budget::view().map_err(|e| e.t
 
 #[tauri::command]
 fn set_budget(limit_cents: u64) -> Result<budget::View, String> { budget::set_limit(limit_cents).map_err(|e| e.to_string()) }
+
+// ---------- macOS Accessibility ----------
+// The Fn shortcut (CGEventTap) and pasting both need Accessibility. Builds are
+// ad-hoc signed, so every update loses the grant; without a visible prompt the
+// shortcut just silently did nothing.
+static KEYBOARD_HOOK_FAILED: AtomicBool = AtomicBool::new(false);
+const ACCESSIBILITY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+#[cfg(target_os = "macos")]
+fn accessibility_trusted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" { fn AXIsProcessTrusted() -> u8; }
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[tauri::command]
+fn accessibility_missing() -> bool {
+    #[cfg(target_os = "macos")]
+    { KEYBOARD_HOOK_FAILED.load(Ordering::SeqCst) || !accessibility_trusted() }
+    #[cfg(not(target_os = "macos"))]
+    { false }
+}
+
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open").arg(ACCESSIBILITY_SETTINGS_URL).status().map_err(|e| e.to_string())?;
+        if status.success() { Ok(()) } else { Err("Could not open System Settings. Open Privacy & Security → Accessibility manually.".into()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = ACCESSIBILITY_SETTINGS_URL; Err("Accessibility settings are only needed on macOS".into()) }
+}
+
+/// The keyboard hook is installed once at startup, so a fresh Accessibility
+/// grant takes effect only after Bolo restarts.
+#[tauri::command]
+fn restart_app(app: AppHandle) -> Result<(), String> {
+    if app.state::<meetings::State>().active.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return Err("Stop the meeting and wait for it to save before restarting Bolo.".into());
+    }
+    // Restarting mid-dictation would drop the paste and skip putting the
+    // user's clipboard back. Recovery pastes run outside `phase`, so also
+    // check the clipboard lock.
+    if !matches!(*app.state::<AppState>().phase.lock().unwrap_or_else(|e| e.into_inner()), Phase::Idle) || paste::busy() {
+        return Err("Wait for the current dictation to finish before restarting Bolo.".into());
+    }
+    app.restart()
+}
 
 #[tauri::command]
 fn platform() -> &'static str {
@@ -621,7 +672,7 @@ fn recover_last(app: &AppHandle, paste_it: bool) {
     tauri::async_runtime::spawn_blocking(move || {
         hotkey::wait_modifiers_released(Duration::from_secs(2));
         let typed = text.clone();
-        let result = if paste_it { paste::type_text(&text, restore, &target) }
+        let result = if paste_it { paste::type_text(&app, &text, restore, &target) }
             else { arboard::Clipboard::new().and_then(|mut c| c.set_text(text)).map_err(anyhow::Error::from) };
         if let Err(e) = result { status(&app, "error", Some(e.to_string())); }
         else if paste_it {
@@ -807,6 +858,10 @@ pub fn run() {
             });
             if let Err(e) = hotkey::start(tx) {
                 eprintln!("keyboard hook: {e}");
+                KEYBOARD_HOOK_FAILED.store(true, Ordering::SeqCst);
+                // On macOS the Accessibility banner explains this; a second,
+                // differently worded error at the top only confused people.
+                #[cfg(not(target_os = "macos"))]
                 status(&handle, "error", Some(e));
             }
             if let Err(e) = apply_hotkey(&handle, &hotkey_str) {
@@ -847,7 +902,9 @@ pub fn run() {
             });
 
             place_pill(&handle);
-            if !std::env::args().any(|a| a == "--hidden") {
+            // Even when launched hidden at login: without Accessibility the
+            // shortcut does nothing, and the window is the only place to say why.
+            if !std::env::args().any(|a| a == "--hidden") || accessibility_missing() {
                 show_main(&handle);
             }
             Ok(())
@@ -863,7 +920,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             meeting_speakers::meeting_speaker_models, meeting_speakers::meeting_download_speaker_models, meeting_recovery::meeting_recovery_quote, meeting_recovery::meeting_recover, meeting_recovery::meeting_recovery_cancel, meeting_notes::meeting_notes_get, meeting_notes::meeting_notes_generate, meetings::meeting_label_speaker, meetings::meeting_get, meetings::meeting_search_all,meetings::meeting_show_files, meetings::meeting_start, meetings::meeting_stop, meetings::meeting_current, meetings::meeting_list, meetings::meeting_delete, meetings::meeting_devices,
-            get_settings, get_status,
+            get_settings, get_status, accessibility_missing, open_accessibility_settings, restart_app,
             save_settings,
             platform,
             get_budget,

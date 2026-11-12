@@ -30,7 +30,48 @@ fn press_shortcut(letter: char) -> Result<()> {
     click.and(release).map_err(|e| anyhow!("keyboard: {e}"))
 }
 
-pub fn type_text(text: &str, restore_clipboard: bool, target: &crate::style::Target) -> Result<()> {
+/// Sends Cmd/Ctrl+letter from a worker thread.
+///
+/// On macOS, enigo turns `Key::Unicode` into a keycode for the current layout
+/// with `TISCopyCurrentKeyboardInputSource`/`TISGetInputSourceProperty`.
+/// macOS 15 asserts those run on the main queue and kills the process
+/// (EXC_BREAKPOINT in `dispatch_assert_queue`) when they don't, so the
+/// keystroke is sent from the main thread and this thread waits for it.
+/// Keeping `Key::Unicode` (not raw keycodes) keeps Dvorak/AZERTY layouts right.
+#[cfg(target_os = "macos")]
+fn send_shortcut(app: &tauri::AppHandle, letter: char) -> Result<()> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+    unsafe extern "C" { fn pthread_main_np() -> std::ffi::c_int; }
+    if unsafe { pthread_main_np() } != 0 { return press_shortcut(letter); }
+
+    const PENDING: u8 = 0; const RUNNING: u8 = 1; const ABANDONED: u8 = 2;
+    let state = Arc::new(AtomicU8::new(PENDING));
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let job = state.clone();
+    app.run_on_main_thread(move || {
+        // If the caller already gave up, sending Cmd+V now could paste a
+        // clipboard that has since been restored. Skip it.
+        if job.compare_exchange(PENDING, RUNNING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let _ = tx.send(press_shortcut(letter));
+        }
+    }).map_err(|e| anyhow!("keyboard: {e}"))?;
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(_) if state.compare_exchange(PENDING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_ok() =>
+            Err(anyhow!("Bolo was busy and could not paste. Your text is safe in History.")),
+        // The keystroke already started on the main thread and normally ends
+        // within milliseconds. Never wait forever: this thread holds the
+        // clipboard lock, and a hang would block every later dictation.
+        Err(_) => rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|_| anyhow!("Pasting got stuck. Your text is safe in History."))?,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_shortcut(_app: &tauri::AppHandle, letter: char) -> Result<()> { press_shortcut(letter) }
+
+pub fn type_text(app: &tauri::AppHandle, text: &str, restore_clipboard: bool, target: &crate::style::Target) -> Result<()> {
     anyhow::ensure!(crate::hotkey::wait_modifiers_released(Duration::from_secs(2)), "Release the shortcut keys. Your text is safe in History.");
     if !crate::style::still_target(target) { return Err(anyhow!("Destination changed. Your text is safe in History.")); }
     let _operation = CLIPBOARD_OPERATION.try_lock().map_err(|_| anyhow!("Another clipboard operation is in progress. Retry from History."))?;
@@ -42,7 +83,7 @@ pub fn type_text(text: &str, restore_clipboard: bool, target: &crate::style::Tar
         Err(anyhow!("Destination changed. Your text is safe in History."))
     } else if sequence != self::sequence() {
         Err(anyhow!("Clipboard changed before pasting. Your text is safe in History."))
-    } else { press_shortcut('v') };
+    } else { send_shortcut(app, 'v') };
     if let Some(backup) = backup {
         sleep(Duration::from_millis(350));
         drop(clipboard);
@@ -53,7 +94,7 @@ pub fn type_text(text: &str, restore_clipboard: bool, target: &crate::style::Tar
 
 /// Copies whatever is selected in the focused app. Returns None when nothing
 /// is selected. The user's clipboard is put back afterwards.
-pub fn copy_selection(target: &crate::style::Target) -> Result<Option<String>> {
+pub fn copy_selection(app: &tauri::AppHandle, target: &crate::style::Target) -> Result<Option<String>> {
     anyhow::ensure!(crate::hotkey::wait_modifiers_released(Duration::from_secs(2)), "Release the shortcut keys before editing");
     let _operation = CLIPBOARD_OPERATION.try_lock().map_err(|_| anyhow!("Another clipboard operation is in progress"))?;
     let backup = Backup::capture()?;
@@ -66,7 +107,7 @@ pub fn copy_selection(target: &crate::style::Target) -> Result<Option<String>> {
         backup.restore(owned)?;
         return Err(anyhow!("Selection or clipboard changed. Your dictation is safe in History."));
     }
-    if let Err(e) = press_shortcut('c') {
+    if let Err(e) = send_shortcut(app, 'c') {
         drop(clipboard); backup.restore(owned)?;
         return Err(e);
     }
@@ -96,6 +137,9 @@ fn sequence() -> Option<String> { arboard::Clipboard::new().ok().and_then(|mut c
 
 
 static CLIPBOARD_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// True while a paste or copy is using the clipboard.
+pub fn busy() -> bool { CLIPBOARD_OPERATION.try_lock().is_err() }
 
 #[cfg(windows)]
 struct Backup { formats: Vec<(u32, Vec<u8>)>, captured_sequence: u32 }
