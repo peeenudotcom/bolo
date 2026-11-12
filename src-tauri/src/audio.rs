@@ -3,7 +3,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -15,6 +15,8 @@ pub struct Recorder {
     handle: Option<thread::JoinHandle<()>>,
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<Mutex<u32>>,
+    /// Audio from before a microphone reconnect, already at 16 kHz.
+    banked: Arc<Mutex<Vec<f32>>>,
     failure: Arc<Mutex<Option<String>>>,
 }
 
@@ -22,28 +24,62 @@ impl Recorder {
     pub fn start(app: AppHandle, microphone: String) -> Result<Self> {
         let samples = Arc::new(Mutex::new(Vec::with_capacity(48_000 * 30)));
         let rate = Arc::new(Mutex::new(TARGET_RATE));
+        let banked = Arc::new(Mutex::new(Vec::new()));
         let failure = Arc::new(Mutex::new(None));
-        let stream_failure = failure.clone();
+        let worker_failure = failure.clone();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
-        let (s2, r2) = (samples.clone(), rate.clone());
+        let (s2, r2, b2) = (samples.clone(), rate.clone(), banked.clone());
 
         let handle = thread::spawn(move || {
-            let limit_app = app.clone();
-            let stream = match open_stream(app, s2, r2, &microphone, stream_failure) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
+            // Bluetooth earbuds switch into headset mode when their mic opens.
+            // That switch can drop the stream for a moment, or leave it
+            // delivering nothing. Previously any such hiccup discarded the
+            // whole dictation; now the mic is reopened and audio kept.
+            let lost = Arc::new(AtomicBool::new(false));
+            let open = |app: AppHandle| -> Result<cpal::Stream> {
+                let stream = open_stream(app, s2.clone(), r2.clone(), &microphone, lost.clone())?;
+                stream.play()?;
+                Ok(stream)
             };
-            if let Err(e) = stream.play() {
-                let _ = ready_tx.send(Err(e.into()));
-                return;
-            }
+            let mut stream = match open(app.clone()) {
+                Ok(s) => s,
+                Err(e) => { let _ = ready_tx.send(Err(e)); return; }
+            };
             if ready_tx.send(Ok(())).is_err() { return; }
-            if matches!(stop_rx.recv_timeout(Duration::from_secs(120)), Err(mpsc::RecvTimeoutError::Timeout)) {
-                crate::act(&limit_app, crate::hotkey::Action::Finish { command: false });
+            let started = Instant::now();
+            let mut opened = Instant::now();
+            let mut reopens = 0;
+            loop {
+                match stop_rx.recv_timeout(Duration::from_millis(200)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+                if started.elapsed() >= Duration::from_secs(120) {
+                    crate::act(&app, crate::hotkey::Action::Finish { command: false });
+                    break;
+                }
+                let silent = opened.elapsed() >= Duration::from_millis(1500)
+                    && s2.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+                if !(lost.swap(false, Ordering::AcqRel) || silent) { continue; }
+                if reopens >= 3 {
+                    *worker_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some("the microphone kept disconnecting".into());
+                    break;
+                }
+                reopens += 1;
+                drop(stream);
+                // Keep what was captured so far, at the rate it was captured.
+                let raw = std::mem::take(&mut *s2.lock().unwrap_or_else(|e| e.into_inner()));
+                let raw_rate = *r2.lock().unwrap_or_else(|e| e.into_inner());
+                b2.lock().unwrap_or_else(|e| e.into_inner()).extend(resample(&raw, raw_rate, TARGET_RATE));
+                thread::sleep(Duration::from_millis(300));
+                match open(app.clone()) {
+                    Ok(s) => { stream = s; opened = Instant::now(); }
+                    Err(e) => {
+                        *worker_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("the microphone disconnected and could not be reopened ({e})"));
+                        return;
+                    }
+                }
             }
             drop(stream);
         });
@@ -56,6 +92,7 @@ impl Recorder {
             handle: Some(handle),
             samples,
             rate,
+            banked,
             failure,
         })
     }
@@ -71,7 +108,9 @@ impl Recorder {
         let raw = std::mem::take(&mut *self.samples.lock().unwrap_or_else(|e| e.into_inner()));
         let rate = *self.rate.lock().unwrap_or_else(|e| e.into_inner());
         let failure = self.failure.lock().unwrap_or_else(|e| e.into_inner()).take();
-        finish_recording(&raw, rate, failure.as_deref())
+        let mut audio = std::mem::take(&mut *self.banked.lock().unwrap_or_else(|e| e.into_inner()));
+        audio.extend(finish_recording(&raw, rate, failure.as_deref())?);
+        Ok(audio)
     }
 }
 
@@ -122,7 +161,7 @@ fn open_stream(
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<Mutex<u32>>,
     microphone: &str,
-    failure: Arc<Mutex<Option<String>>>,
+    failure: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
     let host = cpal::default_host();
     let device = if microphone.is_empty() { host.default_input_device() }
@@ -159,13 +198,12 @@ fn build<T>(
     cfg: &cpal::StreamConfig,
     channels: usize,
     mut sink: Sink,
-    failure: Arc<Mutex<Option<String>>>,
+    lost: Arc<AtomicBool>,
 ) -> Result<cpal::Stream>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
-    let error_app = sink.app.clone();
     let stream = device.build_input_stream(
         cfg.clone(),
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -173,9 +211,10 @@ where
                 frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32
             }));
         },
+        // The recording thread reopens the microphone and keeps the audio.
         move |e| {
-            *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
-            crate::status(&error_app, "error", Some("Microphone disconnected or failed. Cancel and record again.".into()));
+            eprintln!("microphone stream error, reopening: {e}");
+            lost.store(true, Ordering::Release);
         },
         None,
     )?;
@@ -314,6 +353,22 @@ mod tests {
         padded.extend_from_slice(&speech);
         padded.extend(vec![0.0; 16000]);
         assert_eq!(super::speech_audio(padded.clone()).unwrap(), padded);
+    }
+
+    /// Bluetooth earbuds in headset mode deliver 8 kHz (narrowband) or 16 kHz
+    /// (wideband) audio, usually quieter, after a silent wake-up period.
+    #[test]
+    fn bluetooth_headset_quality_speech_is_accepted() {
+        let mut wav = hound::WavReader::new(std::io::Cursor::new(include_bytes!("../tests/fixtures/speech.wav"))).unwrap();
+        let speech: Vec<f32> = wav.samples::<i16>().map(|v| v.unwrap() as f32 / 32768.0).collect();
+        let narrow = super::resample(&super::resample(&speech, 16000, 8000), 8000, 16000);
+        for gain in [1.0, 0.3, 0.1, 0.05] {
+            let mut capture = vec![0.0; 9600]; // ~0.6 s while the earbud mic wakes
+            capture.extend(narrow.iter().map(|s| s * gain));
+            let result = super::speech_audio(capture);
+            eprintln!("narrowband gain {gain}: {}", if result.is_ok() { "accepted" } else { "REJECTED" });
+            assert!(result.is_ok(), "Bluetooth-quality speech rejected at gain {gain}");
+        }
     }
 
     #[test]
